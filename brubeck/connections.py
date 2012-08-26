@@ -119,15 +119,13 @@ def load_zmq_ctx():
         
     return load_zmq_ctx._zmq_ctx
 
-
 ###
-### Mongrel2
+### ZMQ Connection 
 ###
 
-class Mongrel2Connection(Connection):
-    """This class is an abstraction for how Brubeck sends and receives
-    messages. This abstraction makes it possible for something other than
-    Mongrel2 to be used easily.
+class ZMQConnection(Connection):
+    """This is an abstraction of a ZMQ connection
+    and needs to be extended based on the message format.
     """
     MAX_IDENTS = 100
 
@@ -145,30 +143,13 @@ class Mongrel2Connection(Connection):
         in_sock = ctx.socket(zmq.PULL)
         out_sock = ctx.socket(zmq.PUB)
 
-        super(Mongrel2Connection, self).__init__(in_sock, out_sock)
+        super(ZMQConnection, self).__init__(in_sock, out_sock)
         self.in_addr = pull_addr
         self.out_addr = pub_addr
 
         in_sock.connect(pull_addr)
         out_sock.setsockopt(zmq.IDENTITY, self.sender_id)
         out_sock.connect(pub_addr)
-
-    def process_message(self, application, message):
-        """This coroutine looks at the message, determines which handler will
-        be used to process it, and then begins processing.
-        
-        The application is responsible for handling misconfigured routes.
-        """
-        request = Request.parse_msg(message)
-        if request.is_disconnect():
-            return  # Ignore disconnect msgs. Dont have areason to do otherwise
-        handler = application.route_message(request)
-        result = handler()
-
-        http_content = http_response(result['body'], result['status_code'],
-                                     result['status_msg'], result['headers'])
-
-        application.msg_conn.reply(request, http_content)
 
     def recv(self):
         """Receives a raw mongrel2.handler.Request object that you from the
@@ -188,6 +169,54 @@ class Mongrel2Connection(Connection):
                 self.process_message(application, request)
         self._recv_forever_ever(fun_forever)
 
+    def reply(self, req, msg):
+        """Does a reply based on the given Request object and message.
+        """
+        self.send(req.sender, req.conn_id, msg)
+
+    def process_message(self, application, message):
+        """It is up to the implementation to process the message.
+        """
+        self._unsupported('process_message')
+
+    def send(self, uuid, conn_id, msg):
+        """Raw send to the given connection ID at the given uuid, mostly used
+        internally. It is up to the implementation to format the message to send.
+        """
+        self._unsupported('send')
+
+    def close(self):
+        """close a connection
+        """
+        self._unsupported('close')
+        pass
+    
+
+###
+### Mongrel2
+###
+
+class Mongrel2Connection(ZMQConnection):
+    """This class is specific to handling messages from Mongrel2.
+    """
+
+    def process_message(self, application, message):
+        """This coroutine looks at the message, determines which handler will
+        be used to process it, and then begins processing.
+        
+        The application is responsible for handling misconfigured routes.
+        """
+        request = Request.parse_msg(message)
+        if request.is_disconnect():
+            return  # Ignore disconnect msgs. Dont have areason to do otherwise
+        handler = application.route_message(request)
+        result = handler()
+
+        http_content = http_response(result['body'], result['status_code'],
+                                     result['status_msg'], result['headers'])
+
+        application.msg_conn.reply(request, http_content)
+
     def send(self, uuid, conn_id, msg):
         """Raw send to the given connection ID at the given uuid, mostly used
         internally.
@@ -195,10 +224,10 @@ class Mongrel2Connection(Connection):
         header = "%s %d:%s," % (uuid, len(str(conn_id)), str(conn_id))
         self.out_sock.send(header + ' ' + to_bytes(msg))
 
-    def reply(self, req, msg):
-        """Does a reply based on the given Request object and message.
+    def close(self):
+        """Tells mongrel2 to explicitly close the HTTP connection.
         """
-        self.send(req.sender, req.conn_id, msg)
+        pass
 
     def reply_bulk(self, uuid, idents, data):
         """This lets you send a single message to many currently
@@ -209,10 +238,6 @@ class Mongrel2Connection(Connection):
         """
         self.send(uuid, ' '.join(idents), data)
 
-    def close(self):
-        """Tells mongrel2 to explicitly close the HTTP connection.
-        """
-        pass
 
     def close_bulk(self, uuid, idents):
         """Same as close but does it to a whole bunch of idents at a time.
