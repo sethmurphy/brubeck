@@ -62,8 +62,15 @@ import ujson as json
 ### Common helpers
 ###
 
+MESSAGE_TYPES = ['http', 'brubeck']
+
 HTTP_METHODS = ['get', 'post', 'put', 'delete',
                 'head', 'options', 'trace', 'connect']
+
+BRUBECK_METHODS = ['get', 'post', 'put', 'delete', 
+                   'options', 'connect', 'response']
+
+_DEFAULT_BRUBECK_METHOD = 'response'
 
 HTTP_FORMAT = "HTTP/1.1 %(code)s %(status)s\r\n%(headers)s\r\n\r\n%(body)s"
 
@@ -99,6 +106,31 @@ def http_response(body, code, status, headers):
                                      for k, v in headers.items())
 
     return HTTP_FORMAT % payload
+
+def brubeck_response(body, status_code, status_msg, headers):
+    """Renders arguments into a Brubeck response.
+    We don't need all the overhead of an HTTP response,
+    We are structured like a request to keep things simple.
+    """
+    content_length = 0
+    if body is not None:
+        content_length = len(to_bytes(body))
+    if headers is None:
+        headers =  {"METHOD": _DEFAULT_BRUBECK_METHOD}
+    elif "METHOD" not in headers:
+         headers["METHOD"] = _DEFAULT_BRUBECK_METHOD
+         
+    headers['Content-Length'] = content_length
+
+    payload = {
+        'body': body,
+        'status_code': status_code,
+        'status_msg': status_msg,
+        'headers': headers,
+    }
+
+    return payload
+
 
 def _lscmp(a, b):
     """Compares two strings in a cryptographically safe way
@@ -168,6 +200,9 @@ class MessageHandler(object):
     _AUTH_FAILURE = -2
     _SERVER_ERROR = -5
 
+    _HTTP_MESSAGE_TYPE = 0
+    _BRUBECK_MESSAGE_TYPE = 1
+
     _response_codes = {
         0: 'OK',
         -1: 'Bad request',
@@ -191,7 +226,8 @@ class MessageHandler(object):
         self.set_status(self._DEFAULT_STATUS)
         self.set_timestamp(int(time.time() * 1000))
         self.initialize()
-
+        self.message_type = MESSAGE_TYPES[self._HTTP_MESSAGE_TYPE]
+        
     def initialize(self):
         """Hook for subclass. Implementers should be aware that this class's
         __init__ calls initialize.
@@ -304,8 +340,15 @@ class MessageHandler(object):
             if not self._finished:
                 mef = self.message.method.lower()  # M-E-T-H-O-D man!
 
+                logging.debug("mef: %s" % mef)
+                logging.debug("self.message_type: %s" % self.message_type)
+
                 # Find function mapped to method on self
-                if mef in HTTP_METHODS:
+                if (self.message_type == MESSAGE_TYPES[self._HTTP_MESSAGE_TYPE] and
+                    mef in HTTP_METHODS):
+                    fun = getattr(self, mef, self.unsupported)
+                elif (self.message_type == MESSAGE_TYPES[self._BRUBECK_MESSAGE_TYPE] and
+                    mef in BRUBECK_METHODS):
                     fun = getattr(self, mef, self.unsupported)
                 else:
                     fun = self.unsupported
@@ -592,6 +635,29 @@ class JsonSchemaMessageHandler(WebMessageHandler):
                           self.headers)
 
         return response
+
+class BrubeckMessageHandler(MessageHandler):
+    """This class is the simplest implementation of a message handlers. 
+    Intended to be used for BrubeckService inter communication.
+    """
+    def __init__(self, application, message, *args, **kwargs):
+        super(BrubeckMessageHandler, self).__init__(application, message, *args, **kwargs)
+        self.message_type = MESSAGE_TYPES[self._BRUBECK_MESSAGE_TYPE]
+
+    def render(self, status_code=None, status_msg=None, headers = None, **kwargs):
+        if status_code is not None:
+            self.set_status(status_code, status_msg)
+
+        if headers is not None:
+            self.headers = headers
+
+        body = json.dumps(self._payload)
+        logging.info('%s %s %s (%s)' % (status_code, self.message.method,
+                                        self.message.path,
+                                        self.message.remote_addr))
+
+        return brubeck_response(body, self.status_code, self.status_msg, headers)
+
 
 ###
 ### Application logic

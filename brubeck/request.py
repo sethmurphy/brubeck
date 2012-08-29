@@ -1,3 +1,5 @@
+import base64
+import bson
 import cgi
 import json
 import Cookie
@@ -182,7 +184,7 @@ class Request(object):
     @staticmethod
     def parse_msg(msg):
         """Static method for constructing a Request instance out of a
-        message read straight off a zmq socket.
+        message read straight off a zmq socket from a Mongrel2Connection.
         """
         sender, conn_id, path, rest = msg.split(' ', 3)
         headers, rest = parse_netstring(rest)
@@ -220,6 +222,44 @@ class Request(object):
             headers['connection'] = headers['HTTP_CONNECTION']
         r = Request(sender, conn_id, path, headers, body)
         r.is_wsgi = True
+        return r
+
+    @staticmethod
+    def parse_brubeck_request(msg, ident):
+        """Static method for constructing a Request instance out of a
+        message read straight off a zmq socket from a BrubeckServiceClient.
+        """
+        sender, msg_ident, conn_id, path, rest = msg.split(' ', 4)
+
+        if msg_ident != ident:
+            raise Exception('Unknown client identity!')
+
+        headers, body = rest.split(':,', 1)
+        body = json.loads(body)
+        headers = json.loads(headers)
+        r = Request(sender, conn_id, path, headers, body)
+        r.is_wsgi = False
+        return r
+
+    @staticmethod
+    def parse_brubeck_response(msg, ident):
+        """Static method for constructing a Reponse instance out of a
+        message read straight off a zmq socket from a BrubeckServiceConnection.
+        """
+        sender, msg_ident, conn_id, path, rest = msg.split(' ', 4)
+
+        if msg_ident != ident:
+            raise Exception('Unknown service identity!')
+
+        payload = json.loads(rest)
+        
+        body = payload["body"] if "body" in payload else {}
+        status_code = payload["status_code"] if "status_code" in payload else -1
+        status_msg = payload["status_msg"] if "status_msg" in payload else None
+        headers = payload["headers"] if "headers" in payload else {}
+
+        r = Response(sender, conn_id, path, headers, body, status_code, status_msg)
+        r.is_wsgi = False
         return r
 
     def is_disconnect(self):
@@ -269,3 +309,13 @@ class Request(object):
         if not args:
             return default
         return args[-1]
+
+
+class Response(Request):
+    """Our response is from a request to a BrubeckServiceConnection.
+    Pretty much the same as a request, with status information too.
+    """
+    def __init__(self, sender, conn_id, path, headers, body, status_code, status_msg, *args, **kwargs):
+        super(Response, self).__init__(sender, conn_id, path, headers, body)
+        self.status_code = status_code
+        self.status_msg = status_msg
