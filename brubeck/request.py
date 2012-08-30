@@ -1,5 +1,3 @@
-import base64
-import bson
 import cgi
 import json
 import Cookie
@@ -27,12 +25,15 @@ def to_unicode(s, enc='utf8'):
 class Request(object):
     """Word.
     """
-    def __init__(self, sender, conn_id, path, headers, body, *args, **kwargs):
+    def __init__(self, sender, conn_id, path, headers, body, origin_uuid=None, origin_conn_id=None, origin_out_addr=None, *args, **kwargs):
         self.sender = sender
         self.path = path
         self.conn_id = conn_id
         self.headers = headers
         self.body = body
+        self.origin_uuid = origin_uuid
+        self.origin_conn_id = origin_conn_id
+        self.origin_out_addr = origin_out_addr
 
         if self.method == 'JSON':
             self.data = json.loads(body)
@@ -186,6 +187,7 @@ class Request(object):
         """Static method for constructing a Request instance out of a
         message read straight off a zmq socket from a Mongrel2Connection.
         """
+
         sender, conn_id, path, rest = msg.split(' ', 3)
         headers, rest = parse_netstring(rest)
         body, _ = parse_netstring(rest)
@@ -225,40 +227,72 @@ class Request(object):
         return r
 
     @staticmethod
-    def parse_brubeck_request(msg, ident):
+    def parse_brubeck_request(msg, passphrase):
         """Static method for constructing a Request instance out of a
         message read straight off a zmq socket from a BrubeckServiceClient.
         """
-        sender, msg_ident, conn_id, path, rest = msg.split(' ', 4)
+        sender, conn_id, msg_passphrase, origin_passphrase, origin_conn_id, origin_out_addr, path, rest = msg.split(' ', 7)
 
-        if msg_ident != ident:
-            raise Exception('Unknown client identity!')
+        conn_id = Request.parse_field(conn_id)[0]
+        msg_passphrase = Request.parse_field(msg_passphrase)[0]
+        origin_passphrase = Request.parse_field(origin_passphrase)[0]
+        origin_conn_id = Request.parse_field(origin_conn_id)[0]
+        origin_out_addr = Request.parse_field(origin_out_addr)[0]
+        path = Request.parse_field(path)[0]
+        
+        if msg_passphrase != passphrase:
+            raise Exception('Unknown service identity! (%s != %s)' % (str(msg_passphrase),str(passphrase)))
 
-        headers, body = rest.split(':,', 1)
-        body = json.loads(body)
+        headers, body = Request.parse_field(rest)
+        body = Request.parse_field(body)[0]
+
         headers = json.loads(headers)
-        r = Request(sender, conn_id, path, headers, body)
+        body = json.loads(body)
+
+        r = Request(sender, conn_id, path, headers, body, msg_passphrase, origin_passphrase, origin_conn_id, origin_out_addr)
         r.is_wsgi = False
         return r
 
     @staticmethod
-    def parse_brubeck_response(msg, ident):
+    def parse_field(field_text):
+        """ field_value - a value in n:data format where n is the data length
+                and data is the text to get the first n chars from
+            returns the a tuple containing the value and whatever remains
+        """
+        field_data = field_text.split(':', 1)
+        expected_len = int(field_data[0])
+        field_value = field_data[1]
+        value = field_value[0:expected_len]
+        rest = field_value[expected_len:] if len(field_value) > expected_len else ''
+        return (value, rest)
+
+    @staticmethod
+    def parse_brubeck_response(msg, passphrase):
         """Static method for constructing a Reponse instance out of a
         message read straight off a zmq socket from a BrubeckServiceConnection.
         """
-        sender, msg_ident, conn_id, path, rest = msg.split(' ', 4)
 
-        if msg_ident != ident:
-            raise Exception('Unknown service identity!')
+        sender, conn_id, msg_passphrase, origin_passphrase, origin_conn_id, origin_out_addr, path, rest = msg.split(' ', 7)
+        
+        conn_id = Request.parse_field(conn_id)[0]
+        msg_passphrase = Request.parse_field(msg_passphrase)[0]
+        origin_passphrase = Request.parse_field(origin_passphrase)[0]
+        origin_conn_id = Request.parse_field(origin_conn_id)[0]
+        origin_out_addr = Request.parse_field(origin_out_addr)[0]
+        path = Request.parse_field(path)[0]
+        
+        if msg_passphrase != passphrase:
+            raise Exception('Unknown service identity! (%s != %s)' % (str(msg_passphrase),str(passphrase)))
 
-        payload = json.loads(rest)
+        (payload, rest) = Request.parse_field(rest)
+        payload = json.loads(payload)
         
         body = payload["body"] if "body" in payload else {}
         status_code = payload["status_code"] if "status_code" in payload else -1
         status_msg = payload["status_msg"] if "status_msg" in payload else None
         headers = payload["headers"] if "headers" in payload else {}
 
-        r = Response(sender, conn_id, path, headers, body, status_code, status_msg)
+        r = Response(sender, conn_id, path, headers, body, origin_conn_id, origin_out_addr, status_code, status_msg)
         r.is_wsgi = False
         return r
 
@@ -315,7 +349,10 @@ class Response(Request):
     """Our response is from a request to a BrubeckServiceConnection.
     Pretty much the same as a request, with status information too.
     """
-    def __init__(self, sender, conn_id, path, headers, body, status_code, status_msg, *args, **kwargs):
+    def __init__(self, sender, conn_id, path, headers, body, 
+        origin_conn_id, origin_out_sock, status_code, status_msg, *args, **kwargs):
         super(Response, self).__init__(sender, conn_id, path, headers, body)
+        self.origin_conn_id = origin_conn_id
+        self.origin_out_sock = origin_out_sock
         self.status_code = status_code
         self.status_msg = status_msg

@@ -340,9 +340,6 @@ class MessageHandler(object):
             if not self._finished:
                 mef = self.message.method.lower()  # M-E-T-H-O-D man!
 
-                logging.debug("mef: %s" % mef)
-                logging.debug("self.message_type: %s" % self.message_type)
-
                 # Find function mapped to method on self
                 if (self.message_type == MESSAGE_TYPES[self._HTTP_MESSAGE_TYPE] and
                     mef in HTTP_METHODS):
@@ -641,9 +638,10 @@ class BrubeckMessageHandler(MessageHandler):
     Intended to be used for BrubeckService inter communication.
     """
     def __init__(self, application, message, *args, **kwargs):
+        self.headers = {}
         super(BrubeckMessageHandler, self).__init__(application, message, *args, **kwargs)
         self.message_type = MESSAGE_TYPES[self._BRUBECK_MESSAGE_TYPE]
-
+        
     def render(self, status_code=None, status_msg=None, headers = None, **kwargs):
         if status_code is not None:
             self.set_status(status_code, status_msg)

@@ -159,9 +159,7 @@ class ZMQConnection(Connection):
         """Receives a raw mongrel2.handler.Request object that you from the
         zeromq socket and return whatever is found.
         """
-        logging.debug("self.in_sock: %s" % self.in_sock)
         zmq_msg = self.in_sock.recv()
-        logging.debug("Got a message: %s" % zmq_msg)
         return zmq_msg
 
     def recv_forever_ever(self, application):
@@ -228,7 +226,8 @@ class Mongrel2Connection(ZMQConnection):
         internally.
         """
         header = "%s %d:%s," % (uuid, len(str(conn_id)), str(conn_id))
-        self.out_sock.send(header + ' ' + to_bytes(msg))
+        msg = header + ' ' + to_bytes(msg)
+        self.out_sock.send(msg)
 
     def close(self):
         """Tells mongrel2 to explicitly close the HTTP connection.
@@ -307,7 +306,7 @@ class BrubeckServiceConnection(ZMQConnection):
     """
     _BRUBECK_MESSAGE_TYPE = 1
     
-    def __init__(self, svc_addr, ident):
+    def __init__(self, svc_addr, passphrase):
         """sender_id = uuid.uuid4() or anything unique
         pull_addr = pull socket used for incoming messages
         pub_addr = publish socket used for outgoing messages
@@ -331,7 +330,7 @@ class BrubeckServiceConnection(ZMQConnection):
         self.out_addr = svc_addr
 
         self.zmq = zmq
-        self.ident = ident
+        self.passphrase = passphrase
 
         #out_sock.setsockopt(zmq.IDENTITY, self.sender_id)
 
@@ -343,12 +342,10 @@ class BrubeckServiceConnection(ZMQConnection):
         
         The application is responsible for handling misconfigured routes.
         """
-        logging.debug("BrubeckServiceConnection process_message start");
-        request = Request.parse_brubeck_request(message, self.ident)
+
+        request = Request.parse_brubeck_request(message, self.passphrase)
         if request.is_disconnect():
             return  # Ignore disconnect msgs. Dont have areason to do otherwise
-        logging.debug("request.path=%s" % request.path);
-        logging.debug("request.method=%s" % request.method);
         request.message_type = MESSAGE_TYPES[self._BRUBECK_MESSAGE_TYPE]
  
         handler = application.route_message(request)
@@ -359,19 +356,29 @@ class BrubeckServiceConnection(ZMQConnection):
         msg = ""
         if result is not None and result is not "":
             msg = json.dumps(result)
-        application.msg_conn.send(request.sender, self.ident, request.conn_id, msg, request.path)
+        application.msg_conn.send(request.sender, request.origin_uuid, request.origin_conn_id, request.origin_out_addr, msg, request.path)
 
-    def send(self, sender_id, ident, conn_id, msg, path):
-        """ident = unique ID that both the client and server need to match
-           conn_id = a unique connection id
-                not used, mainly left over from Mongrel2 implementation
+    def send(self, sender_uuid, origin_passphrase, origin_conn_id, origin_out_addr, msg, path):
+        """uuid = unique ID that both the client and server need to match
+           origin_uuid = unique ID from the original request
+           origin_conn_id = the connection id from the original request
+           origin_out_addr = the socket address that expects the final result
            msg = the payload (a JSON object)
+           path = the path used to route to the proper response handler
         """
-        
-        header = "%s %s %d:%s %s" % (sender_id, ident,len(str(conn_id)), str(conn_id), path)
-        msg = header + ' ' + to_bytes(msg)
+        conn_id = uuid4()
 
-        self.out_sock.send(sender_id, self.zmq.SNDMORE)
+        header = "%s %d:%s %d:%s %d:%s %d:%s %d:%s %d:%s" % ( sender_uuid,
+            len(str(conn_id)), str(conn_id),
+            len(self.passphrase), self.passphrase,
+            len(origin_passphrase), origin_passphrase,
+            len(str(origin_conn_id)), str(origin_conn_id),
+            len(origin_out_addr), origin_out_addr,
+            len(path), path
+        )
+        msg = '%s %d:%s' % (header, len(msg), to_bytes(msg))
+
+        self.out_sock.send(sender_uuid, self.zmq.SNDMORE)
         self.out_sock.send("", self.zmq.SNDMORE)
         self.out_sock.send(msg)
 
@@ -385,7 +392,6 @@ class BrubeckServiceConnection(ZMQConnection):
         while self.in_sock.getsockopt(self.zmq.RCVMORE):
             zmq_msg += self.in_sock.recv()
 
-        logging.debug("Got a message: %s" % (zmq_msg))
         return zmq_msg
 
 
@@ -394,9 +400,9 @@ class BrubeckServiceClient(BrubeckServiceConnection):
     """This class is specific to communicating with a BrubeckServiceConnection.
     """
 
-    def __init__(self, svc_addr, ident, async=False):
-        """ ident = unique ID that both the client and server need to match
-                not used yet
+    def __init__(self, svc_addr, passphrase, async=False):
+        """ passphrase = unique ID that both the client and server need to match
+                for security purposed
 
             svc_addr = address of the Brubeck Service we are connecting to
             This socket is used for both inbound and outbound messages
@@ -414,8 +420,10 @@ class BrubeckServiceClient(BrubeckServiceConnection):
                 so the initial brubeck instance is as non-blocking as possible
                 for the request.
         """
-        self.ident = ident
+        
+        self.passphrase = passphrase
         self.sender_id = str(uuid4())
+        
         self.async = async
 
         zmq = load_zmq()
@@ -438,13 +446,21 @@ class BrubeckServiceClient(BrubeckServiceConnection):
         self.zmq = zmq
 
 
-    def send(self, msg, path="/", headers="{\"METHOD\": \"put\"}"):
+    def send(self, msg, origin_passphrase, origin_conn_id, origin_out_addr, path="/", headers="{\"METHOD\": \"put\"}"):
         """Send will wait for a response and return it if async is False
         """
         conn_id = uuid4()
-        
-        header = " %s %d:%s %s" % (self.ident, len(str(conn_id)), str(conn_id), path)
-        msg = header + ' ' + to_bytes("%s:,%s" % (headers, msg))
+
+        header = "%d:%s %d:%s %d:%s %d:%s %d:%s %d:%s" % (
+            len(str(conn_id)), str(conn_id),
+            len(str(self.passphrase)), str(self.passphrase),
+            len(origin_passphrase),origin_passphrase,
+            len(str(origin_conn_id)), str(origin_conn_id),
+            len(origin_out_addr), origin_out_addr,
+            len(path), path,
+        )
+
+        msg = ' %s %d:%s%d:%s' % (header, len(headers), headers, len(msg), to_bytes(msg))
 
         self.out_sock.send(msg)
 
@@ -453,15 +469,18 @@ class BrubeckServiceClient(BrubeckServiceConnection):
 
         return self.recv()
 
-    def process_message(self, application, message):
+    def process_message(self, application, message, handle=True):
         """This coroutine looks at the message, determines which handler will
         be used to process it, and then begins processing.
         Since this is a reply, not a request,
         we simply call the handler and are done
         """
-        request = Request.parse_brubeck_response(message, self.ident)
+        response = Request.parse_brubeck_response(message, self.passphrase)
+        
+        if handle:
+            handler = application.route_message(response)
+            handler.set_status(request.status_code,  request.status_msg)
+            result = handler()
+            return result
 
-        handler = application.route_message(request)
-        handler.set_status(request.status_code,  request.status_msg)
-
-        result = handler()
+        return response
