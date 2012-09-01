@@ -5,12 +5,11 @@ import re
 import logging
 import Cookie
 
-from request import to_bytes, to_unicode, parse_netstring, Request
+from request import to_bytes, to_unicode, parse_netstring, Request, Response
 from request_handling import brubeck_response
 from request_handling import http_response
 from request_handling import MESSAGE_TYPES
-
-
+from request_handling import coro_spawn
 
 ###
 ### Connection Classes
@@ -199,27 +198,34 @@ class ZMQConnection(Connection):
 ###
 ### Mongrel2
 ###
+# this is just for testing, should be in class
+def mongrel2_process_message(application, message):
+    """This coroutine looks at the message, determines which handler will
+    be used to process it, and then begins processing.
+    
+    The application is responsible for handling misconfigured routes.
+    """
+    request = Request.parse_msg(message)
+    if request.is_disconnect():
+        return  # Ignore disconnect msgs. Dont have areason to do otherwise
+    handler = application.route_message(request)
+    result = handler()
+
+    http_content = http_response(result['body'], result['status_code'],
+                                 result['status_msg'], result['headers'])
+
+    application.msg_conn.reply(request, http_content)
 
 class Mongrel2Connection(ZMQConnection):
     """This class is specific to handling messages from Mongrel2.
     """
 
     def process_message(self, application, message):
-        """This coroutine looks at the message, determines which handler will
-        be used to process it, and then begins processing.
-        
-        The application is responsible for handling misconfigured routes.
-        """
-        request = Request.parse_msg(message)
-        if request.is_disconnect():
-            return  # Ignore disconnect msgs. Dont have areason to do otherwise
-        handler = application.route_message(request)
-        result = handler()
+        #without coroutine
+        mongrel2_process_message(application, message)
 
-        http_content = http_response(result['body'], result['status_code'],
-                                     result['status_msg'], result['headers'])
-
-        application.msg_conn.reply(request, http_content)
+        # with coroutine
+        #coro_spawn(mongrel2_process_message, application, message)
 
     def send(self, uuid, conn_id, msg):
         """Raw send to the given connection ID at the given uuid, mostly used
@@ -301,8 +307,33 @@ class WSGIConnection(Connection):
 ### Brubeck service connections (service and client)
 ###
 
-class BrubeckServiceConnection(ZMQConnection):
-    """This class is specific to handling communication with a BrubeckServiceClient.
+# this is just for testing, should be in class
+def service_process_message(application, message):
+    """This coroutine looks at the message, determines which handler will
+    be used to process it, and then begins processing.
+    
+    The application is responsible for handling misconfigured routes.
+    """
+
+    request = Request.parse_brubeck_request(message, application.msg_conn.passphrase)
+    if request.is_disconnect():
+        return  # Ignore disconnect msgs. Dont have areason to do otherwise
+    request.message_type = MESSAGE_TYPES[application.msg_conn._BRUBECK_MESSAGE_TYPE]
+
+    handler = application.route_message(request)
+    result = handler()
+
+    brubeck_content = brubeck_response(result['body'], result['status_code'],
+                                 result['status_msg'], result['headers'])
+    msg = ""
+    if result is not None and result is not "":
+        msg = json.dumps(result)
+    application.msg_conn.send(request.sender, request.conn_id,
+        request.origin_uuid, request.origin_conn_id,
+        request.origin_out_addr, msg, request.path)
+
+class ServiceConnection(ZMQConnection):
+    """This class is specific to handling communication with a ServiceClientConnection.
     """
     _BRUBECK_MESSAGE_TYPE = 1
     
@@ -337,41 +368,28 @@ class BrubeckServiceConnection(ZMQConnection):
         #in_sock.connect(pull_addr)
 
     def process_message(self, application, message):
-        """This coroutine looks at the message, determines which handler will
-        be used to process it, and then begins processing.
-        
-        The application is responsible for handling misconfigured routes.
-        """
+        #without coroutine
+        service_process_message(application, message)
 
-        request = Request.parse_brubeck_request(message, self.passphrase)
-        if request.is_disconnect():
-            return  # Ignore disconnect msgs. Dont have areason to do otherwise
-        request.message_type = MESSAGE_TYPES[self._BRUBECK_MESSAGE_TYPE]
- 
-        handler = application.route_message(request)
-        result = handler()
+        # with coroutine
+        #coro_spawn(service_process_message, application, message)
 
-        brubeck_content = brubeck_response(result['body'], result['status_code'],
-                                     result['status_msg'], result['headers'])
-        msg = ""
-        if result is not None and result is not "":
-            msg = json.dumps(result)
-        application.msg_conn.send(request.sender, request.origin_uuid, request.origin_conn_id, request.origin_out_addr, msg, request.path)
-
-    def send(self, sender_uuid, origin_passphrase, origin_conn_id, origin_out_addr, msg, path):
+    def send(self, sender_uuid, conn_id, 
+        origin_sender_id, origin_conn_id,
+        origin_out_addr, msg, path):
         """uuid = unique ID that both the client and server need to match
+           conn_id = connection id from this request needed to wake up handler on response
            origin_uuid = unique ID from the original request
            origin_conn_id = the connection id from the original request
            origin_out_addr = the socket address that expects the final result
            msg = the payload (a JSON object)
            path = the path used to route to the proper response handler
         """
-        conn_id = uuid4()
 
         header = "%s %d:%s %d:%s %d:%s %d:%s %d:%s %d:%s" % ( sender_uuid,
             len(str(conn_id)), str(conn_id),
             len(self.passphrase), self.passphrase,
-            len(origin_passphrase), origin_passphrase,
+            len(origin_sender_id), origin_sender_id,
             len(str(origin_conn_id)), str(origin_conn_id),
             len(origin_out_addr), origin_out_addr,
             len(path), path
@@ -381,9 +399,10 @@ class BrubeckServiceConnection(ZMQConnection):
         self.out_sock.send(sender_uuid, self.zmq.SNDMORE)
         self.out_sock.send("", self.zmq.SNDMORE)
         self.out_sock.send(msg)
-
+        return
+        
     def recv(self):
-        """Receives a message from a BrubeckServiceClient.
+        """Receives a message from a ServiceClientConnection.
         """
 
         # blocking recv call
@@ -395,9 +414,25 @@ class BrubeckServiceConnection(ZMQConnection):
         return zmq_msg
 
 
+# this is just for testing, should be in class
+def service_client_process_message(application, message, passphrase, service_client, service_addr, handle=True):
+    """This coroutine looks at the message, determines which handler will
+    be used to process it, and then begins processing.
+    Since this is a reply, not a request,
+    we simply call the handler and are done
+    returns a tuple containing 1) the response object created 
+        from parsing the message and 2) the handlers return value
+    """
+    response = Response.parse_brubeck_response(message, passphrase)
+    
+    if handle:
+        handler = application.route_message(response)
+        handler.set_status(response.status_code,  response.status_msg)
+        result = handler()
+        service_client._notify(service_addr, response, result)
 
-class BrubeckServiceClient(BrubeckServiceConnection):
-    """This class is specific to communicating with a BrubeckServiceConnection.
+class ServiceClientConnection(ServiceConnection):
+    """This class is specific to communicating with a ServiceConnection.
     """
 
     def __init__(self, svc_addr, passphrase, async=False):
@@ -411,7 +446,7 @@ class BrubeckServiceClient(BrubeckServiceConnection):
                 If async is True then send() returns the response and
                 the same client is guaranteed to receive the response
     
-                If async is False then send() returns immedietally and a
+                If async is False then send() returns immediately and a
                 DEALER socket is used, meaning the response may be handled 
                 by any connected clients using fair-queuing
                 
@@ -420,7 +455,7 @@ class BrubeckServiceClient(BrubeckServiceConnection):
                 so the initial brubeck instance is as non-blocking as possible
                 for the request.
         """
-        
+
         self.passphrase = passphrase
         self.sender_id = str(uuid4())
         
@@ -445,42 +480,35 @@ class BrubeckServiceClient(BrubeckServiceConnection):
 
         self.zmq = zmq
 
+    def process_message(self, application, message, service_client, service_addr):
+        #without coroutine
+        service_client_process_message(application, message, self.passphrase, service_client, service_addr)
 
-    def send(self, msg, origin_passphrase, origin_conn_id, origin_out_addr, path="/", headers="{\"METHOD\": \"put\"}"):
+        # with coroutine
+        #coro_spawn(service_client_process_message, application, message, self.passphrase, service_client, service_addr)
+
+    def send(self, service_req):
         """Send will wait for a response and return it if async is False
         """
-        conn_id = uuid4()
+        service_req.conn_id = str(uuid4())
+
 
         header = "%d:%s %d:%s %d:%s %d:%s %d:%s %d:%s" % (
-            len(str(conn_id)), str(conn_id),
+            len(str(service_req.conn_id)), str(service_req.conn_id),
             len(str(self.passphrase)), str(self.passphrase),
-            len(origin_passphrase),origin_passphrase,
-            len(str(origin_conn_id)), str(origin_conn_id),
-            len(origin_out_addr), origin_out_addr,
-            len(path), path,
+            len(service_req.origin_sender_id),service_req.origin_sender_id,
+            len(str(service_req.origin_conn_id)), str(service_req.origin_conn_id),
+            len(service_req.origin_out_addr), service_req.origin_out_addr,
+            len(service_req.path), service_req.path,
         )
 
-        msg = ' %s %d:%s%d:%s' % (header, len(headers), headers, len(msg), to_bytes(msg))
-
+        msg = ' %s %d:%s%d:%s' % (header, len(service_req.headers), service_req.headers, len(service_req.body), to_bytes(service_req.body))
+        #logging.debug("ServiceClientConnection send: %s" % msg)
         self.out_sock.send(msg)
 
-        if self.async:
-            return
-
-        return self.recv()
-
-    def process_message(self, application, message, handle=True):
-        """This coroutine looks at the message, determines which handler will
-        be used to process it, and then begins processing.
-        Since this is a reply, not a request,
-        we simply call the handler and are done
-        """
-        response = Request.parse_brubeck_response(message, self.passphrase)
+        return service_req
         
-        if handle:
-            handler = application.route_message(response)
-            handler.set_status(request.status_code,  request.status_msg)
-            result = handler()
-            return result
+        #if self.async:
+        #    return
 
-        return response
+        #return self.recv()

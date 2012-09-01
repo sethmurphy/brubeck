@@ -6,6 +6,7 @@ version = "0.4.0"
 version_info = (0, 4, 0)
 __all__ = ['auth',
            'autoapi',
+           'service',
            'caching',
            'datamosh',
            'models',

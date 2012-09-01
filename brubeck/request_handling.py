@@ -16,6 +16,7 @@ try:
     from gevent import monkey
     monkey.patch_all()
     from gevent import pool
+    from gevent import Greenlet
 
     coro_pool = pool.Pool
 
@@ -54,8 +55,9 @@ import cPickle as pickle
 from itertools import chain
 import os, sys
 from dictshield.base import ShieldException
+from dictshield.document import Document
+from dictshield.fields import StringField
 from request import Request, to_bytes, to_unicode
-
 import ujson as json
 
 ###
@@ -68,9 +70,10 @@ HTTP_METHODS = ['get', 'post', 'put', 'delete',
                 'head', 'options', 'trace', 'connect']
 
 BRUBECK_METHODS = ['get', 'post', 'put', 'delete', 
-                   'options', 'connect', 'response']
+                   'options', 'connect', 'response', 'request']
 
-_DEFAULT_BRUBECK_METHOD = 'response'
+_DEFAULT_BRUBECK_REQUEST_METHOD = 'request'
+_DEFAULT_BRUBECK_RESPONSE_METHOD = 'response'
 
 HTTP_FORMAT = "HTTP/1.1 %(code)s %(status)s\r\n%(headers)s\r\n\r\n%(body)s"
 
@@ -116,9 +119,9 @@ def brubeck_response(body, status_code, status_msg, headers):
     if body is not None:
         content_length = len(to_bytes(body))
     if headers is None:
-        headers =  {"METHOD": _DEFAULT_BRUBECK_METHOD}
+        headers =  {"METHOD": _DEFAULT_BRUBECK_RESPONSE_METHOD}
     elif "METHOD" not in headers:
-         headers["METHOD"] = _DEFAULT_BRUBECK_METHOD
+         headers["METHOD"] = _DEFAULT_BRUBECK_RESPONSE_METHOD
          
     headers['Content-Length'] = content_length
 
@@ -635,7 +638,7 @@ class JsonSchemaMessageHandler(WebMessageHandler):
 
 class BrubeckMessageHandler(MessageHandler):
     """This class is the simplest implementation of a message handlers. 
-    Intended to be used for BrubeckService inter communication.
+    Intended to be used for Service inter communication.
     """
     def __init__(self, application, message, *args, **kwargs):
         self.headers = {}
@@ -655,7 +658,6 @@ class BrubeckMessageHandler(MessageHandler):
                                         self.message.remote_addr))
 
         return brubeck_response(body, self.status_code, self.status_msg, headers)
-
 
 ###
 ### Application logic
