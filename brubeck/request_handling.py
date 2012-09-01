@@ -69,11 +69,8 @@ MESSAGE_TYPES = ['http', 'brubeck']
 HTTP_METHODS = ['get', 'post', 'put', 'delete',
                 'head', 'options', 'trace', 'connect']
 
-BRUBECK_METHODS = ['get', 'post', 'put', 'delete', 
+SERVICE_METHODS = ['get', 'post', 'put', 'delete', 
                    'options', 'connect', 'response', 'request']
-
-_DEFAULT_BRUBECK_REQUEST_METHOD = 'request'
-_DEFAULT_BRUBECK_RESPONSE_METHOD = 'response'
 
 HTTP_FORMAT = "HTTP/1.1 %(code)s %(status)s\r\n%(headers)s\r\n\r\n%(body)s"
 
@@ -109,31 +106,6 @@ def http_response(body, code, status, headers):
                                      for k, v in headers.items())
 
     return HTTP_FORMAT % payload
-
-def brubeck_response(body, status_code, status_msg, headers):
-    """Renders arguments into a Brubeck response.
-    We don't need all the overhead of an HTTP response,
-    We are structured like a request to keep things simple.
-    """
-    content_length = 0
-    if body is not None:
-        content_length = len(to_bytes(body))
-    if headers is None:
-        headers =  {"METHOD": _DEFAULT_BRUBECK_RESPONSE_METHOD}
-    elif "METHOD" not in headers:
-         headers["METHOD"] = _DEFAULT_BRUBECK_RESPONSE_METHOD
-         
-    headers['Content-Length'] = content_length
-
-    payload = {
-        'body': body,
-        'status_code': status_code,
-        'status_msg': status_msg,
-        'headers': headers,
-    }
-
-    return payload
-
 
 def _lscmp(a, b):
     """Compares two strings in a cryptographically safe way
@@ -204,7 +176,7 @@ class MessageHandler(object):
     _SERVER_ERROR = -5
 
     _HTTP_MESSAGE_TYPE = 0
-    _BRUBECK_MESSAGE_TYPE = 1
+    _SERVICE_MESSAGE_TYPE = 1
 
     _response_codes = {
         0: 'OK',
@@ -347,8 +319,8 @@ class MessageHandler(object):
                 if (self.message_type == MESSAGE_TYPES[self._HTTP_MESSAGE_TYPE] and
                     mef in HTTP_METHODS):
                     fun = getattr(self, mef, self.unsupported)
-                elif (self.message_type == MESSAGE_TYPES[self._BRUBECK_MESSAGE_TYPE] and
-                    mef in BRUBECK_METHODS):
+                elif (self.message_type == MESSAGE_TYPES[self._SERVICE_MESSAGE_TYPE] and
+                    mef in SERVICE_METHODS):
                     fun = getattr(self, mef, self.unsupported)
                 else:
                     fun = self.unsupported
@@ -635,29 +607,6 @@ class JsonSchemaMessageHandler(WebMessageHandler):
                           self.headers)
 
         return response
-
-class BrubeckMessageHandler(MessageHandler):
-    """This class is the simplest implementation of a message handlers. 
-    Intended to be used for Service inter communication.
-    """
-    def __init__(self, application, message, *args, **kwargs):
-        self.headers = {}
-        super(BrubeckMessageHandler, self).__init__(application, message, *args, **kwargs)
-        self.message_type = MESSAGE_TYPES[self._BRUBECK_MESSAGE_TYPE]
-        
-    def render(self, status_code=None, status_msg=None, headers = None, **kwargs):
-        if status_code is not None:
-            self.set_status(status_code, status_msg)
-
-        if headers is not None:
-            self.headers = headers
-
-        body = json.dumps(self._payload)
-        logging.info('%s %s %s (%s)' % (status_code, self.message.method,
-                                        self.message.path,
-                                        self.message.remote_addr))
-
-        return brubeck_response(body, self.status_code, self.status_msg, headers)
 
 ###
 ### Application logic
