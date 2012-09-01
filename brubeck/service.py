@@ -114,7 +114,7 @@ class ServiceMessageHandler(MessageHandler):
         if headers is not None:
             self.headers = headers
 
-        body = json.dumps(self._payload)
+        body = self._payload
         
         logging.info('%s %s %s (%s:%s) for (%s:%s)' % (status_code, self.message.method,
                                         self.message.path,
@@ -222,18 +222,18 @@ class ServiceClientMixin(object):
         else:
             raise exception('%s is already waiting on %s!' % (conn_id, service_addr))
             
-    def _notify(self, service_addr, response, handler_response):
+    def _notify(self, service_addr, service_response, handler_response):
         events = self._get_events(service_addr)
 
         for key, value in events.iteritems() :
             logging.debug("events[%s] = %s" % (key, value))
 
-        conn_id = response.conn_id
+        conn_id = service_response.conn_id
         
         if conn_id in events:
             try:
                 # wake up and pass value
-                events[conn_id].set((response, handler_response))
+                events[conn_id].set((service_response, handler_response))
                 
                 # make sure our event is received before we delete it
                 gevent.sleep(0) 
@@ -256,6 +256,10 @@ class ServiceClientMixin(object):
             headers - dict, contains the accepted method to call on handler
             msg - dict, the body of the message to process
         """
+        if not isinstance(headers, dict):
+            headers = json.loads(headers)
+        if not isinstance(msg, dict):
+            msg = json.loads(msg)
 
         data = {
             # Not sure if this is the socket_id, but it is used to return the message to the originator
@@ -354,17 +358,23 @@ def parse_service_request(msg, passphrase):
     return r
 
 def create_service_response(service_request, handler, msg={}, headers={"METHOD": _DEFAULT_SERVICE_RESPONSE_METHOD}):
+
+    if not isinstance(headers, dict):
+        headers = json.loads(headers)
+    if not isinstance(msg, dict):
+        msg = json.loads(msg)
+
     service_response = ServiceResponse(**{
-            "sender": service_request.sender,
-            "conn_id": service_request.conn_id,
-            "origin_sender_id": service_request.origin_sender_id,
-            "origin_conn_id": service_request.origin_conn_id,
-            "origin_out_addr": service_request.origin_out_addr,
-            "path": service_request.path,
-            "headers": headers,
-            "body": msg,
-            "status_code": handler.status_code,
-            "status_msg": handler.status_msg,
+        "sender": service_request.sender,
+        "conn_id": service_request.conn_id,
+        "origin_sender_id": service_request.origin_sender_id,
+        "origin_conn_id": service_request.origin_conn_id,
+        "origin_out_addr": service_request.origin_out_addr,
+        "path": service_request.path,
+        "headers": headers,
+        "body": msg,
+        "status_code": handler.status_code,
+        "status_msg": handler.status_msg,
     })
 
     return service_response
@@ -373,7 +383,7 @@ def parse_service_response(msg, passphrase):
     """Static method for constructing a Reponse instance out of a
     message read straight off a zmq socket from a ServiceConnection.
     """
-    logging.debug("parse_service_request: %s" % msg)
+    logging.debug("parse_service_response: %s" % msg)
 
     sender, conn_id, msg_passphrase, origin_sender_id, origin_conn_id, origin_out_addr, path, rest = msg.split(' ', 7)
     
@@ -508,10 +518,10 @@ class ServiceConnection(ZMQConnection):
 
     def process_message(self, application, message):
         #without coroutine
-        service_process_message(application, message)
+        #service_process_message(application, message)
 
         # with coroutine
-        #coro_spawn(service_process_message, application, message)
+        coro_spawn(service_process_message, application, message)
 
     def send(self, service_response):
         """uuid = unique ID that both the client and server need to match
