@@ -1,43 +1,3 @@
-### Attempt to setup gevent
-try:
-    from gevent import monkey
-    monkey.patch_all()
-    import gevent
-    from gevent import pool
-    from gevent import Greenlet
-    from gevent.event import AsyncResult
-
-    coro_pool = pool.Pool
-    coro_thread = Greenlet
-
-    def coro_spawn(function, app, message, *a, **kw):
-        app.pool.spawn(function, app, message, *a, **kw)
-
-    CORO_LIBRARY = 'gevent'
-
-### Fallback to eventlet
-except ImportError:
-    raise EnvironmentError(
-        'brubeck service connections do not support the eventlet concurrency model.'
-    )
-    # TODO: support eventlet
-    try:
-        import eventlet
-        import eventlet.greenthread
-        eventlet.patcher.monkey_patch(all=True)
-
-        coro_pool = eventlet.GreenPool
-        coro_thread = greenthread
-
-        def coro_spawn(function, app, message, *a, **kw):
-            app.pool.spawn_n(function, app, message, *a, **kw)
-
-        CORO_LIBRARY = 'eventlet'
-
-    except ImportError:
-        raise EnvironmentError('You need to install eventlet or gevent')
-
-
 import logging
 import os
 import sys
@@ -50,7 +10,12 @@ from connections import (
     ZMQConnection,
 )
 from request import Request, to_bytes, to_unicode
-from request_handling import MessageHandler, http_response, MESSAGE_TYPES
+from request_handling import (
+    MessageHandler,
+    http_response,
+    MESSAGE_TYPES,
+    coro_spawn
+)
 from dictshield.document import Document
 from dictshield.fields import (StringField,
                                BooleanField,
@@ -68,32 +33,12 @@ _DEFAULT_SERVICE_RESPONSE_METHOD = 'response'
 ##########################################
 ## Handler stuff
 ##########################################
-class ServiceClientListener(Greenlet):
-    """Adds the functionality to any handler to send messages to a ServiceConnection
-    """
-    def __init__(self, application, service_addr, service_conn, service_client, *args, **kwargs):
-        """handler is a ServiceClientMixin"""
-        super(ServiceClientListener, self).__init__()
-        self.service_addr = service_addr
-        self.service_conn = service_conn
-        self.service_client = service_client
-        self.application = application
-        self._keep_running = True
-        gevent.sleep(0)
-
-    def _run(self):
-        logging.debug("ServiceClientListener run()")
-        while self._keep_running:
-            raw_response = self.service_conn.recv()
-            (response, handler_response) = self.service_conn.process_message(application, response)
-            self.service_client._notify(service_addr, response, handler_response)
-
 def service_response_listener(application, service_addr, service_conn, service_client):
     logging.debug("Starting start_service_response_listener");
     while True:
         logging.debug("service_response_listener waiting");
         raw_response = service_conn.recv()
-        logging.debug("service_response_listener waiting received response: %s" % raw_response);
+        #logging.debug("service_response_listener waiting received response: %s" % raw_response);
         service_conn.process_message( application, raw_response, 
             service_client, service_addr
             )
@@ -141,7 +86,7 @@ class ServiceClientMixin(object):
     __services = {}  
 
     def _register_service(self, service_addr, service_passphrase):
-        """ Create and store a connection and it's listener and events queue.
+        """ Create and store a connection and it's listener and waiting_sockets queue.
         To be safe, for now there is no unregister.
         """ 
         if service_addr not in self.__services:
@@ -153,10 +98,9 @@ class ServiceClientMixin(object):
 
             # create and start our listener
             logging.debug("_register_service starting listener: %s" % service_addr)
-            service_listener = Greenlet(service_response_listener, self.application, service_addr, service_conn, self)
-            service_listener.start()
+            coro_spawn(service_response_listener, self.application, service_addr, service_conn, self)
             # give above process a chance to start
-            gevent.sleep(0)
+            #gevent.sleep(0)
 
 
             #service_listener = ServiceClientListener(self.application, service_addr, service_conn, self)
@@ -167,7 +111,7 @@ class ServiceClientMixin(object):
             self.__services[service_addr] = {
                 'conns': service_conn,
                 #'service_listener': service_listener ,
-                'events': {},
+                'waiting_sockets': {},
             }
             logging.debug("_register_service success: %s" % service_addr)
         else:
@@ -186,66 +130,43 @@ class ServiceClientMixin(object):
         """send our message, used internally only"""
         conn = self._get_conn(service_addr)
         return conn.send(service_req)
-
-    def _get_events(self, service_addr):
-        return self._get_conn_info(service_addr)['events']
+    
+    def _get_waiting_sockets(self, service_addr):
+        return self._get_conn_info(service_addr)['waiting_sockets']
 
     def _wait(self, service_addr, conn_id):
-        events = self._get_events(service_addr)
-        if conn_id not in events:
-            event = AsyncResult()
-            logging.debug("registering event for conn_id %s" % conn_id)
-            events[conn_id] = event
-            
-            # this is a kludge
-            if False:
-                loop = True
-                value = None
-                # I don't like this
-                # seems like the only way I can keep 
-                # one handler job waiting though
-                # event.wait blocks everything
-    
-                while loop:
-                    try:
-                        value = event.get_nowait()
-                        loop = False
-                    except:
-                        gevent.sleep(0)
-                return value
-            else:
-                # this is how I want to do it
-                # works only if each request is processed in it's own coroutine
-                event.wait()
-                return event.value
+        # use an inproc socket, naturally non-blocking blocking
+        # in memory sending, cheap
+        zmq = load_zmq()
+        ctx = load_zmq_ctx()
 
-        else:
-            raise exception('%s is already waiting on %s!' % (conn_id, service_addr))
+        rep_sock = ctx.socket(zmq.REQ)
+        rep_sock.bind('inproc://%s' % conn_id)
+        waiting_sockets = self._get_waiting_sockets(service_addr)
+        waiting_sockets[conn_id] = rep_sock
+
+        req_sock = ctx.socket(zmq.REP)
+        req_sock.connect('inproc://%s' % conn_id)
+        r = req_sock.recv()
+
+        result = json.loads(r)
+        return (result["service_response"],result["result"])
             
     def _notify(self, service_addr, service_response, handler_response):
-        events = self._get_events(service_addr)
-
-        for key, value in events.iteritems() :
-            logging.debug("events[%s] = %s" % (key, value))
+        waiting_sockets = self._get_waiting_sockets(service_addr)
 
         conn_id = service_response.conn_id
-        
-        if conn_id in events:
-            try:
-                # wake up and pass value
-                events[conn_id].set((service_response, handler_response))
-                
-                # make sure our event is received before we delete it
-                gevent.sleep(0) 
-            except:
-                pass
-            finally:
-                try:
-                    del events[conn_id]
-                except:
-                    pass
+        if conn_id in waiting_sockets:
+            # send value to waiting socket
+            r = {
+                "service_response": service_response,
+                "result": handler_response
+            }
+            waiting_sockets[conn_id].send(json.dumps(r))
+            del waiting_sockets[conn_id]
         else:
             logging.debug("conn_id %s not found to notify." % conn_id)
+ 
     ################################
     ## The public interface methods
     ## This is all your handlers should use
@@ -322,7 +243,7 @@ def parse_service_request(msg, passphrase):
     """Static method for constructing a Request instance out of a
     message read straight off a zmq socket from a ServiceClientConnection.
     """
-    logging.debug("parse_service_request: %s" % msg)
+    #logging.debug("parse_service_request: %s" % msg)
     sender, conn_id, msg_passphrase, origin_sender_id, origin_conn_id, origin_out_addr, path, rest = msg.split(' ', 7)
 
     conn_id = parse_msgstring(conn_id)[0]
@@ -335,10 +256,7 @@ def parse_service_request(msg, passphrase):
     if msg_passphrase != passphrase:
         raise Exception('Unknown service identity! (%s != %s)' % (str(msg_passphrase),str(passphrase)))
 
-    logging.debug("parse_service_request: rest: %s" % rest)
     headers, body = parse_msgstring(rest)
-    logging.debug("parse_service_request: headers: %s" % headers)
-    logging.debug("parse_service_request: body: %s" % body)
     body = parse_msgstring(body)[0]
 
     headers = json.loads(headers)
@@ -383,7 +301,7 @@ def parse_service_response(msg, passphrase):
     """Static method for constructing a Reponse instance out of a
     message read straight off a zmq socket from a ServiceConnection.
     """
-    logging.debug("parse_service_response: %s" % msg)
+    #logging.debug("parse_service_response: %s" % msg)
 
     sender, conn_id, msg_passphrase, origin_sender_id, origin_conn_id, origin_out_addr, path, rest = msg.split(' ', 7)
     
@@ -550,7 +468,7 @@ class ServiceConnection(ZMQConnection):
             len(body), body,
         )
         
-        logging.debug("ServiceConnection send: %s" % msg)
+        #logging.debug("ServiceConnection send: %s" % msg)
         
         self.out_sock.send(service_response.sender, self.zmq.SNDMORE)
         self.out_sock.send("", self.zmq.SNDMORE)
@@ -661,37 +579,7 @@ class ServiceClientConnection(ServiceConnection):
         body = to_bytes(json.dumps(service_req.body))
 
         msg = ' %s %d:%s%d:%s' % (header, len(headers), headers, len(body), body)
-        logging.debug("ServiceClientConnection send: %s" % msg)
+        #logging.debug("ServiceClientConnection send: %s" % msg)
         self.out_sock.send(msg)
 
         return service_req
-        
-        #if self.async:
-        #    return
-
-        #return self.recv()
-
-def mongrel2co_process_message(application, message):
-    """This coroutine looks at the message, determines which handler will
-    be used to process it, and then begins processing.
-    
-    The application is responsible for handling misconfigured routes.
-    """
-    request = Request.parse_msg(message)
-    if request.is_disconnect():
-        return  # Ignore disconnect msgs. Dont have areason to do otherwise
-    handler = application.route_message(request)
-    result = handler()
-
-    http_content = http_response(result['body'], result['status_code'],
-                                 result['status_msg'], result['headers'])
-
-    application.msg_conn.reply(request, http_content)
-
-class Mongrel2CoConnection(Mongrel2Connection):
-    """This class is specific to handling messages from Mongrel2 and running in request in it's own greenlet.
-    """
-
-    def process_message(self, application, message):
-        """process a message in a coroutine so we can have handlers safely use blocking gevent function"""
-        coro_spawn(mongrel2co_process_message, application, message)
