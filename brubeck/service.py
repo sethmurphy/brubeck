@@ -311,7 +311,11 @@ def service_client_process_message(application, message, passphrase, service_cli
         handler = application.route_message(service_response)
         handler.set_status(service_response.status_code,  service_response.status_msg)
         result = handler()
-        service_client._notify(service_addr, service_response, result)
+        #service_client._notify(service_addr, service_response, result)
+        return (service_response, result)
+
+    rerurn (service_response, None)
+
 
 class ServiceClientConnection(ServiceConnection):
     """This class is specific to communicating with a ServiceConnection.
@@ -396,15 +400,22 @@ class ServiceClientConnection(ServiceConnection):
 ##########################################
 ## Handler stuff
 ##########################################
-def service_response_listener(application, service_addr, service_conn, service_client):
+def service_response_listener(application, service_addr, service_conn):
     logging.debug("Starting start_service_response_listener");
     while True:
         logging.debug("service_response_listener waiting");
         raw_response = service_conn.recv()
         #logging.debug("service_response_listener waiting received response: %s" % raw_response);
-        service_conn.process_message( application, raw_response, 
-            service_client, service_addr
-            )
+        #service_conn.process_message( application, raw_response, 
+        #    service_client, service_addr
+        #    )
+
+        # just send raw mwssage to connection client
+        sender, conn_id = msg.split(' ', 1)
+        
+        conn_id = parse_msgstring(conn_id)[0]
+        service_client._notify(service_addr, service_response, result)
+
 
 class ServiceMessageHandler(MessageHandler):
     """This class is the simplest implementation of a message handlers. 
@@ -461,7 +472,7 @@ class ServiceClientMixin(object):
 
             # create and start our listener
             logging.debug("_register_service starting listener: %s" % service_addr)
-            coro_spawn(service_response_listener, self.application, service_addr, service_conn, self)
+            coro_spawn(service_response_listener, self.application, service_addr)
             # give above process a chance to start
             #gevent.sleep(0)
 
@@ -492,7 +503,7 @@ class ServiceClientMixin(object):
     def _send(self, service_addr, service_req):
         """send our message, used internally only"""
         conn = self._get_conn(service_addr)
-        return conn.send(service_req)
+        return conn.send(service_req, this.zmq.NOBLOCK)
     
     def _get_waiting_sockets(self, service_addr):
         return self._get_conn_info(service_addr)['waiting_sockets']
@@ -510,26 +521,36 @@ class ServiceClientMixin(object):
 
         req_sock = ctx.socket(zmq.REP)
         req_sock.connect('inproc://%s' % conn_id)
-        r = req_sock.recv()
 
-        result = json.loads(r)
-        service_response =  ServiceResponse(**result["service_response"])
-        result = result["result"]
+        poller = zmq.Poller()
+        poller.register(req_sock, zmq.POLLIN)
+        # Loop and accept messages from both channels, acting accordingly
 
-        return (service_response, result)
+        socks = dict(poller.poll(100))
+        if socks:
+            if socks.get(req_sock) == zmq.POLLIN:
+                raw_response = req_sock.recv(zmq.NOBLOCK)
+            else:
+                logging.debug("error: message timeout")
+
+        # close the sockets, we are done with it
+        # maybe we should have a pool ...
+        req_sock.close()
+        rep_sock.close()
+        
+        del waiting_sockets[conn_id]
+
+        results = service_conn.process_message( application, raw_response, 
+            self, service_addr
+            )
+
+        return results
             
-    def _notify(self, service_addr, service_response, handler_response):
+    def _notify(self, service_addr, conn_id, raw_results):
         waiting_sockets = self._get_waiting_sockets(service_addr)
 
-        conn_id = service_response.conn_id
         if conn_id in waiting_sockets:
-            # send value to waiting socket
-            r = {
-                "service_response": service_response,
-                "result": handler_response
-            }
-            waiting_sockets[conn_id].send(json.dumps(r))
-            del waiting_sockets[conn_id]
+            waiting_sockets[conn_id].send(raw_results)
         else:
             logging.debug("conn_id %s not found to notify." % conn_id)
  
@@ -579,7 +600,7 @@ class ServiceClientMixin(object):
         """do some work and wait for the results of the response to handle the response from the service
         blocking, waits for handled result.
         """
-        service_req = self._send(service_addr, service_req)
+        service_req = self._send(service_addr, service_req, this.zmq.NOBLOCK)
         conn_id = service_req.conn_id
         (response, handler_response) = self._wait(service_addr, conn_id)
 
