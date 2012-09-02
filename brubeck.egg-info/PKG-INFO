@@ -1,0 +1,10 @@
+Metadata-Version: 1.0
+Name: brubeck
+Version: 0.4.0
+Summary: Python Library for building Mongrel2 / ZeroMQ message handlers
+Home-page: http://github.com/j2labs/brubeck
+Author: James Dennis
+Author-email: jdennis@gmail.com
+License: UNKNOWN
+Description: UNKNOWN
+Platform: UNKNOWN

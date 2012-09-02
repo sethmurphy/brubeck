@@ -30,198 +30,6 @@ from uuid import uuid4
 _DEFAULT_SERVICE_REQUEST_METHOD = 'request'
 _DEFAULT_SERVICE_RESPONSE_METHOD = 'response'
 
-##########################################
-## Handler stuff
-##########################################
-def service_response_listener(application, service_addr, service_conn, service_client):
-    logging.debug("Starting start_service_response_listener");
-    while True:
-        logging.debug("service_response_listener waiting");
-        raw_response = service_conn.recv()
-        #logging.debug("service_response_listener waiting received response: %s" % raw_response);
-        service_conn.process_message( application, raw_response, 
-            service_client, service_addr
-            )
-
-class ServiceMessageHandler(MessageHandler):
-    """This class is the simplest implementation of a message handlers. 
-    Intended to be used for Service inter communication.
-    """
-    def __init__(self, application, message, *args, **kwargs):
-        self.headers = {}
-        super(ServiceMessageHandler, self).__init__(application, message, *args, **kwargs)
-        self.message_type = MESSAGE_TYPES[self._SERVICE_MESSAGE_TYPE]
-        
-    def render(self, status_code=None, status_msg=None, headers = None, **kwargs):
-        if status_code is not None:
-            self.set_status(status_code, status_msg)
-
-        if headers is not None:
-            self.headers = headers
-
-        body = self._payload
-        
-        logging.info('%s %s %s (%s:%s) for (%s:%s)' % (status_code, self.message.method,
-                                        self.message.path,
-                                        self.message.sender,
-                                        self.message.conn_id,
-                                        self.message.origin_out_addr,
-                                        self.message.origin_conn_id,
-                                        ))
-
-        return body
-
-class ServiceClientMixin(object):
-    """Adds the functionality to any handler to send messages to a ServiceConnection
-    This must be used with a handler or something that has the following attributes:
-        self.application
-    """
-
-    # Dicts to hold our registered connections
-    # There may be one per adress
-    # Maybe they should go at the application level, 
-    # but I am treading lightly...
-
-    # holds our registered service connections and corresponding listeners
-    __services = {}  
-
-    def _register_service(self, service_addr, service_passphrase):
-        """ Create and store a connection and it's listener and waiting_sockets queue.
-        To be safe, for now there is no unregister.
-        """ 
-        if service_addr not in self.__services:
-            # create our service connection
-            logging.debug("_register_service creating service_conn: %s" % service_addr)
-            service_conn = ServiceClientConnection(
-                service_addr, service_passphrase, async=True
-            )
-
-            # create and start our listener
-            logging.debug("_register_service starting listener: %s" % service_addr)
-            coro_spawn(service_response_listener, self.application, service_addr, service_conn, self)
-            # give above process a chance to start
-            #gevent.sleep(0)
-
-
-            #service_listener = ServiceClientListener(self.application, service_addr, service_conn, self)
-            #service_listener.start()
-            #service_listener.join()
-
-            # add us to the list
-            self.__services[service_addr] = {
-                'conns': service_conn,
-                #'service_listener': service_listener ,
-                'waiting_sockets': {},
-            }
-            logging.debug("_register_service success: %s" % service_addr)
-        else:
-            logging.debug("_register_service ignored: %s already registered" % service_addr)
-
-    def _get_conn_info(self, service_addr):
-        if service_addr in self.__services:
-            return self.__services[service_addr]
-        else:
-            raise Exception("%s service not registered" % service_addr)
-
-    def _get_conn(self, service_addr):
-        return self._get_conn_info(service_addr)['conns']
-
-    def _send(self, service_addr, service_req):
-        """send our message, used internally only"""
-        conn = self._get_conn(service_addr)
-        return conn.send(service_req)
-    
-    def _get_waiting_sockets(self, service_addr):
-        return self._get_conn_info(service_addr)['waiting_sockets']
-
-    def _wait(self, service_addr, conn_id):
-        # use an inproc socket, naturally non-blocking blocking
-        # in memory sending, cheap
-        zmq = load_zmq()
-        ctx = load_zmq_ctx()
-
-        rep_sock = ctx.socket(zmq.REQ)
-        rep_sock.bind('inproc://%s' % conn_id)
-        waiting_sockets = self._get_waiting_sockets(service_addr)
-        waiting_sockets[conn_id] = rep_sock
-
-        req_sock = ctx.socket(zmq.REP)
-        req_sock.connect('inproc://%s' % conn_id)
-        r = req_sock.recv()
-
-        result = json.loads(r)
-        return (result["service_response"],result["result"])
-            
-    def _notify(self, service_addr, service_response, handler_response):
-        waiting_sockets = self._get_waiting_sockets(service_addr)
-
-        conn_id = service_response.conn_id
-        if conn_id in waiting_sockets:
-            # send value to waiting socket
-            r = {
-                "service_response": service_response,
-                "result": handler_response
-            }
-            waiting_sockets[conn_id].send(json.dumps(r))
-            del waiting_sockets[conn_id]
-        else:
-            logging.debug("conn_id %s not found to notify." % conn_id)
- 
-    ################################
-    ## The public interface methods
-    ## This is all your handlers should use
-    ################################
-
-    def create_service_request(self, path, headers, msg):
-        """ path - string, used to route to proper handler
-            headers - dict, contains the accepted method to call on handler
-            msg - dict, the body of the message to process
-        """
-        if not isinstance(headers, dict):
-            headers = json.loads(headers)
-        if not isinstance(msg, dict):
-            msg = json.loads(msg)
-
-        data = {
-            # Not sure if this is the socket_id, but it is used to return the message to the originator
-            "origin_sender_id": self.message.sender,
-            # This is the connection id used by the originator and is needed for Mongrel2
-            "origin_conn_id": self.message.conn_id,
-            # This is the socket address for the reply to the client
-            "origin_out_addr": self.application.msg_conn.out_addr,
-            # used to route the request
-            "path": path,
-            # a dict, right now only METHOD is required and must be one of: ['get', 'post', 'put', 'delete','options', 'connect', 'response', 'request']
-            "headers": headers,
-            # a dict, this can be whatever you need it to be to get the job done.
-            "body": msg,
-        }
-        return ServiceRequest(**data)
-    
-    def register_service(self, service_addr, service_passphrase):
-        """just a wrapper for our internal_register_service method right now"""
-        return self._register_service(service_addr, service_passphrase)
-
-    def punt(self, service_addr, service_req):
-        """give up any responsability for the request, someone else will respond to the client
-        """
-        raise NotImplemented("punt is not yet implemented, use run instead")
-
-
-    def run(self, service_addr, service_req):
-        """do some work, but wait for the response to handle the response from the service
-        """
-        service_req = self._send(service_addr, service_req)
-        conn_id = service_req.conn_id
-        (response, handler_response) = self._wait(service_addr, conn_id)
-
-        return (response, handler_response)
-
-    def execute(self, service_addr, service_req):
-        """defer some work, but still handle the response yourself"""
-        self._send(service_addr, service_req)
-        return
-
 
 #################################
 ## Request and Response stuff 
@@ -583,3 +391,206 @@ class ServiceClientConnection(ServiceConnection):
         self.out_sock.send(msg)
 
         return service_req
+
+
+##########################################
+## Handler stuff
+##########################################
+def service_response_listener(application, service_addr, service_conn, service_client):
+    logging.debug("Starting start_service_response_listener");
+    while True:
+        logging.debug("service_response_listener waiting");
+        raw_response = service_conn.recv()
+        #logging.debug("service_response_listener waiting received response: %s" % raw_response);
+        service_conn.process_message( application, raw_response, 
+            service_client, service_addr
+            )
+
+class ServiceMessageHandler(MessageHandler):
+    """This class is the simplest implementation of a message handlers. 
+    Intended to be used for Service inter communication.
+    """
+    def __init__(self, application, message, *args, **kwargs):
+        self.headers = {}
+        super(ServiceMessageHandler, self).__init__(application, message, *args, **kwargs)
+        self.message_type = MESSAGE_TYPES[self._SERVICE_MESSAGE_TYPE]
+        
+    def render(self, status_code=None, status_msg=None, headers = None, **kwargs):
+        if status_code is not None:
+            self.set_status(status_code, status_msg)
+
+        if headers is not None:
+            self.headers = headers
+
+        body = self._payload
+        
+        logging.info('%s %s %s (%s:%s) for (%s:%s)' % (status_code, self.message.method,
+                                        self.message.path,
+                                        self.message.sender,
+                                        self.message.conn_id,
+                                        self.message.origin_out_addr,
+                                        self.message.origin_conn_id,
+                                        ))
+
+        return body
+
+class ServiceClientMixin(object):
+    """Adds the functionality to any handler to send messages to a ServiceConnection
+    This must be used with a handler or something that has the following attributes:
+        self.application
+    """
+
+    # Dicts to hold our registered connections
+    # There may be one per adress
+    # Maybe they should go at the application level, 
+    # but I am treading lightly...
+
+    # holds our registered service connections and corresponding listeners
+    __services = {}  
+
+    def _register_service(self, service_addr, service_passphrase):
+        """ Create and store a connection and it's listener and waiting_sockets queue.
+        To be safe, for now there is no unregister.
+        """ 
+        if service_addr not in self.__services:
+            # create our service connection
+            logging.debug("_register_service creating service_conn: %s" % service_addr)
+            service_conn = ServiceClientConnection(
+                service_addr, service_passphrase, async=True
+            )
+
+            # create and start our listener
+            logging.debug("_register_service starting listener: %s" % service_addr)
+            coro_spawn(service_response_listener, self.application, service_addr, service_conn, self)
+            # give above process a chance to start
+            #gevent.sleep(0)
+
+
+            #service_listener = ServiceClientListener(self.application, service_addr, service_conn, self)
+            #service_listener.start()
+            #service_listener.join()
+
+            # add us to the list
+            self.__services[service_addr] = {
+                'conns': service_conn,
+                #'service_listener': service_listener ,
+                'waiting_sockets': {},
+            }
+            logging.debug("_register_service success: %s" % service_addr)
+        else:
+            logging.debug("_register_service ignored: %s already registered" % service_addr)
+
+    def _get_conn_info(self, service_addr):
+        if service_addr in self.__services:
+            return self.__services[service_addr]
+        else:
+            raise Exception("%s service not registered" % service_addr)
+
+    def _get_conn(self, service_addr):
+        return self._get_conn_info(service_addr)['conns']
+
+    def _send(self, service_addr, service_req):
+        """send our message, used internally only"""
+        conn = self._get_conn(service_addr)
+        return conn.send(service_req)
+    
+    def _get_waiting_sockets(self, service_addr):
+        return self._get_conn_info(service_addr)['waiting_sockets']
+
+    def _wait(self, service_addr, conn_id):
+        # use an inproc socket, naturally non-blocking blocking
+        # in memory sending, cheap
+        zmq = load_zmq()
+        ctx = load_zmq_ctx()
+
+        rep_sock = ctx.socket(zmq.REQ)
+        rep_sock.bind('inproc://%s' % conn_id)
+        waiting_sockets = self._get_waiting_sockets(service_addr)
+        waiting_sockets[conn_id] = rep_sock
+
+        req_sock = ctx.socket(zmq.REP)
+        req_sock.connect('inproc://%s' % conn_id)
+        r = req_sock.recv()
+
+        result = json.loads(r)
+        service_response =  ServiceResponse(**result["service_response"])
+        result = result["result"]
+
+        return (service_response, result)
+            
+    def _notify(self, service_addr, service_response, handler_response):
+        waiting_sockets = self._get_waiting_sockets(service_addr)
+
+        conn_id = service_response.conn_id
+        if conn_id in waiting_sockets:
+            # send value to waiting socket
+            r = {
+                "service_response": service_response,
+                "result": handler_response
+            }
+            waiting_sockets[conn_id].send(json.dumps(r))
+            del waiting_sockets[conn_id]
+        else:
+            logging.debug("conn_id %s not found to notify." % conn_id)
+ 
+    ################################
+    ## The public interface methods
+    ## This is all your handlers should use
+    ################################
+
+    def create_service_request(self, path, headers, msg):
+        """ path - string, used to route to proper handler
+            headers - dict, contains the accepted method to call on handler
+            msg - dict, the body of the message to process
+        """
+        if not isinstance(headers, dict):
+            headers = json.loads(headers)
+        if not isinstance(msg, dict):
+            msg = json.loads(msg)
+
+        data = {
+            # Not sure if this is the socket_id, but it is used to return the message to the originator
+            "origin_sender_id": self.message.sender,
+            # This is the connection id used by the originator and is needed for Mongrel2
+            "origin_conn_id": self.message.conn_id,
+            # This is the socket address for the reply to the client
+            "origin_out_addr": self.application.msg_conn.out_addr,
+            # used to route the request
+            "path": path,
+            # a dict, right now only METHOD is required and must be one of: ['get', 'post', 'put', 'delete','options', 'connect', 'response', 'request']
+            "headers": headers,
+            # a dict, this can be whatever you need it to be to get the job done.
+            "body": msg,
+        }
+        return ServiceRequest(**data)
+    
+    def register_service(self, service_addr, service_passphrase):
+        """just a wrapper for our internal_register_service method right now"""
+        return self._register_service(service_addr, service_passphrase)
+
+    def forward(self, service_addr, service_req):
+        """give up any responsability for the request, someone else will respond to the client
+        non-blocking, returns immediately.
+        """
+        raise NotImplemented("forward is not yet implemented, use send_nowait instead")
+
+
+    def send(self, service_addr, service_req):
+        """do some work and wait for the results of the response to handle the response from the service
+        blocking, waits for handled result.
+        """
+        service_req = self._send(service_addr, service_req)
+        conn_id = service_req.conn_id
+        (response, handler_response) = self._wait(service_addr, conn_id)
+
+        return (response, handler_response)
+
+    def send_nowait(self, service_addr, service_req):
+        """defer some work, but still handle the response yourself
+        non-blocking, returns immediately.
+        """
+        self._send(service_addr, service_req)
+        return
+
+
+      
