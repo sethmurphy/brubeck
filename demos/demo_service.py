@@ -27,7 +27,6 @@ class SlowEchoServiceHandler(ServiceMessageHandler):
 ## runtime configuration
 ##
 config = {
-    # we need a Mongrel2CoConnection to run each requests handling  in a greenlet
     'msg_conn': ServiceConnection('ipc://run/slow', 'my_shared_secret'),
     'handler_tuples': [ ## Set up our routes
         # Handle our service responses

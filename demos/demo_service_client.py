@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 import logging
-from brubeck.service import Mongrel2CoConnection
+from brubeck.connections import Mongrel2Connection
 from brubeck.request_handling import (
     JSONMessageHandler,
     WebMessageHandler, 
@@ -110,7 +110,7 @@ class ServiceResponseHandler(ServiceMessageHandler):
 ##
 config = {
     # we need a Mongrel2CoConnection to run each requests handling  in a greenlet
-    'msg_conn': Mongrel2CoConnection('tcp://127.0.0.1:9999', 
+    'msg_conn': Mongrel2Connection('tcp://127.0.0.1:9999', 
                                      'tcp://127.0.0.1:9998'),
     'handler_tuples': [ ## Set up our routes
         # Handle our service responses
