@@ -198,33 +198,26 @@ class ZMQConnection(Connection):
 ### Mongrel2
 ###
 # this is just for testing, should be in class
-def mongrel2_process_message(application, message):
-    """This coroutine looks at the message, determines which handler will
-    be used to process it, and then begins processing.
-    
-    The application is responsible for handling misconfigured routes.
-    """
-    request = Request.parse_msg(message)
-    if request.is_disconnect():
-        return  # Ignore disconnect msgs. Dont have areason to do otherwise
-    handler = application.route_message(request)
-    result = handler()
-
-    http_content = http_response(result['body'], result['status_code'],
-                                 result['status_msg'], result['headers'])
-
-    application.msg_conn.reply(request, http_content)
-
 class Mongrel2Connection(ZMQConnection):
     """This class is specific to handling messages from Mongrel2.
     """
 
     def process_message(self, application, message):
-        #without coroutine
-        #mongrel2_process_message(application, message)
-
-        # with coroutine
-        coro_spawn(mongrel2_process_message, application, message)
+        """This coroutine looks at the message, determines which handler will
+        be used to process it, and then begins processing.
+        
+        The application is responsible for handling misconfigured routes.
+        """
+        request = Request.parse_msg(message)
+        if request.is_disconnect():
+            return  # Ignore disconnect msgs. Dont have areason to do otherwise
+        handler = application.route_message(request)
+        result = handler()
+    
+        http_content = http_response(result['body'], result['status_code'],
+                                     result['status_msg'], result['headers'])
+    
+        application.msg_conn.reply(request, http_content)
 
     def send(self, uuid, conn_id, msg):
         """Raw send to the given connection ID at the given uuid, mostly used

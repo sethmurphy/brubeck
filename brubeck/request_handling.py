@@ -54,11 +54,11 @@ import hmac
 import cPickle as pickle
 from itertools import chain
 import os, sys
+import ujson as json
 from dictshield.base import ShieldException
 from dictshield.document import Document
 from dictshield.fields import StringField
 from request import Request, to_bytes, to_unicode
-import ujson as json
 
 ###
 ### Common helpers
@@ -139,6 +139,18 @@ def cookie_decode(data, key):
 def cookie_is_encoded(data):
     ''' Return True if the argument looks like a encoded cookie.'''
     return bool(data.startswith(to_bytes('!')) and to_bytes('?') in data)
+
+def parse_msgstring(field_text):
+    """ field_value - a value in n:data format where n is the data length
+            and data is the text to get the first n chars from
+        returns the a tuple containing the value and whatever remains
+    """
+    field_data = field_text.split(':', 1)
+    expected_len = int(field_data[0])
+    field_value = field_data[1]
+    value = field_value[0:expected_len]
+    rest = field_value[expected_len:] if len(field_value) > expected_len else ''
+    return (value, rest)
 
 
 ###
@@ -612,6 +624,25 @@ class JsonSchemaMessageHandler(WebMessageHandler):
 ### Application logic
 ###
 
+def service_response_listener(application, service_addr, service_conn):
+    """runs in a coroutine, one listener for each server per handler.
+    Onc running, it stays running until the brubeck instance is killed."""
+    ##try:
+    while True:
+        logging.debug("service_response_listener waiting");
+        raw_response = service_conn.recv()
+        logging.debug("service_response_listener recv(): %s" % raw_response);
+        # just send raw message to connection client
+        sender, conn_id = raw_response.split(' ', 1)
+        
+        conn_id = parse_msgstring(conn_id)[0]
+        application.notify(service_addr, conn_id, raw_response)
+    ##except:
+    ##    raise
+    ##finally:
+    ##    # once a listener dies, de-register the service, it's useless
+    ##    application.unregister_service(service_addr)
+
 class Brubeck(object):
 
     MULTIPLE_ITEM_SEP = ','
@@ -696,6 +727,9 @@ class Brubeck(object):
 
         # This must be set to use secure cookies
         self.cookie_secret = cookie_secret
+
+        # holds our registered service connections and corresponding listeners
+        self._services = {}  
 
         # Any template engine can be used. Brubeck just needs a function that
         # loads the environment without arguments.
@@ -838,6 +872,103 @@ class Brubeck(object):
 
         self.add_route_rule(api_url, APIClass)
         JsonSchemaMessageHandler.add_model(model)
+
+    ##########################################################################
+    ## Deal with registering/deregistering services at the application level
+    ## used by ServiceClientMixin handler
+    ##########################################################################
+
+
+    def service_is_registered(self, service_addr):
+        """ Check if a service is registered""" 
+        if service_addr in self._services:
+            return True
+        else:
+            return False
+
+    def register_service(self, service_addr, service_conn):
+        """ Create and store a connection and it's listener and waiting_sockets queue.
+        To be safe, for now there is no unregister.
+        """ 
+        if service_addr not in self._services:
+            # create our service connection
+            logging.debug("register_service creating service_conn: %s" % service_addr)
+
+            # create and start our listener
+            logging.debug("register_service starting listener: %s" % service_addr)
+            coro_spawn(service_response_listener, self, service_addr, service_conn)
+            # give above process a chance to start
+            #gevent.sleep(0)
+
+
+            #service_listener = ServiceClientListener(self.application, service_addr, service_conn, self)
+            #service_listener.start()
+            #service_listener.join()
+
+            # add us to the list
+            self._services[service_addr] = {
+                'service_conn': service_conn,
+                #'service_listener': service_listener ,
+                'waiting_sockets': {},
+            }
+            logging.debug("register_service success: %s" % service_addr)
+        else:
+            logging.debug("register_service ignored: %s already registered" % service_addr)
+        return True
+
+    def unregister_service(self, service_addr):
+        """ Create and store a connection and it's listener and waiting_sockets queue.
+        To be safe, for now there is no unregister.
+        """ 
+        if service_addr not in self._services:
+            logging.debug("unregister_service ignored: %s not registered" % service_addr)
+            return False
+        else:
+            service_info = self._services[service_addr]
+            # make sure we don't get new requests
+            service_conn = service_info['service_conn']
+            waiting_sockets = service_info['waiting_sockets']
+
+
+            service_conn.close()
+            for sock in waiting_sockets:
+                logging.debug("killing internal reply socket %s" % sock)
+                sock.close()
+
+            logging.debug("unregister_service success: %s" % service_addr)
+
+            del self._services[service_addr]
+
+            return True
+
+    def get_service_info(self, service_addr):
+        if service_addr in self._services:
+            return self._services[service_addr]
+        else:
+            raise Exception("%s service not registered" % service_addr)
+
+    def get_service_conn(self, service_addr):
+        return self.get_service_info(service_addr)['service_conn']
+
+    def send_service_request(self, service_addr, service_req):
+        """send our message, used internally only"""
+        logging.debug("sending service request")
+        service_conn = self.get_service_conn(service_addr)
+        return service_conn.send(service_req)
+    
+    def get_waiting_sockets(self, service_addr):
+        return self.get_service_info(service_addr)['waiting_sockets']
+
+    def notify(self, service_addr, conn_id, raw_results):
+        logging.debug("NOTIFY: %s: %s (%s)" % (service_addr, conn_id, raw_results))
+        waiting_sockets = self.get_waiting_sockets(service_addr)
+        logging.debug("waiting_sockets: %s" % (waiting_sockets))
+        conn_id = str(conn_id)
+        if conn_id in waiting_sockets:
+            logging.debug("conn_id %s found to notify(%s)" % (conn_id,waiting_sockets[conn_id]))
+            waiting_sockets[conn_id].send(raw_results)
+        else:
+            logging.debug("conn_id %s not found to notify." % conn_id)
 
 
     ###

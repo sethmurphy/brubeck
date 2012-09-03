@@ -25,6 +25,7 @@ from dictshield.fields import (StringField,
                                DictField,
                                IntField)
 from uuid import uuid4
+from brubeck.request_handling import parse_msgstring
 
 
 _DEFAULT_SERVICE_REQUEST_METHOD = 'request'
@@ -34,18 +35,6 @@ _DEFAULT_SERVICE_RESPONSE_METHOD = 'response'
 #################################
 ## Request and Response stuff 
 #################################
-
-def parse_msgstring(field_text):
-    """ field_value - a value in n:data format where n is the data length
-            and data is the text to get the first n chars from
-        returns the a tuple containing the value and whatever remains
-    """
-    field_data = field_text.split(':', 1)
-    expected_len = int(field_data[0])
-    field_value = field_data[1]
-    value = field_value[0:expected_len]
-    rest = field_value[expected_len:] if len(field_value) > expected_len else ''
-    return (value, rest)
 
 def parse_service_request(msg, passphrase):
     """Static method for constructing a Request instance out of a
@@ -185,27 +174,6 @@ class ServiceResponse(ServiceRequest):
 ######################################################################################
 
 # this is outside the class in case we want to run with coro_spawn
-def service_process_message(application, message):
-    """This coroutine looks at the message, determines which handler will
-    be used to process it, and then begins processing.
-    
-    The application is responsible for handling misconfigured routes.
-    """
-
-    service_request = parse_service_request(message, application.msg_conn.passphrase)
-    service_request.message_type = MESSAGE_TYPES[application.msg_conn._BRUBECK_MESSAGE_TYPE]
-
-    handler = application.route_message(service_request)
-    result = handler()
-
-    msg = {}
-
-    if result is not None and result is not "":
-        msg = json.dumps(result)
-
-    service_response = create_service_response(service_request, handler, msg)
-        
-    application.msg_conn.send(service_response)
 
 class ServiceConnection(ZMQConnection):
     """This class is specific to handling communication with a ServiceClientConnection.
@@ -243,11 +211,26 @@ class ServiceConnection(ZMQConnection):
         #in_sock.connect(pull_addr)
 
     def process_message(self, application, message):
-        #without coroutine
-        #service_process_message(application, message)
-
-        # with coroutine
-        coro_spawn(service_process_message, application, message)
+        """This coroutine looks at the message, determines which handler will
+        be used to process it, and then begins processing.
+        
+        The application is responsible for handling misconfigured routes.
+        """
+    
+        service_request = parse_service_request(message, application.msg_conn.passphrase)
+        service_request.message_type = MESSAGE_TYPES[application.msg_conn._BRUBECK_MESSAGE_TYPE]
+    
+        handler = application.route_message(service_request)
+        result = handler()
+    
+        msg = {}
+    
+        if result is not None and result is not "":
+            msg = json.dumps(result)
+    
+        service_response = create_service_response(service_request, handler, msg)
+            
+        application.msg_conn.send(service_response)
 
     def send(self, service_response):
         """uuid = unique ID that both the client and server need to match
@@ -297,26 +280,6 @@ class ServiceConnection(ZMQConnection):
 
 
 # this is outside the class in case we want to run with coro_spawn
-def service_client_process_message(application, message, passphrase, service_client, service_addr, handle=True):
-    """This coroutine looks at the message, determines which handler will
-    be used to process it, and then begins processing.
-    Since this is a reply, not a request,
-    we simply call the handler and are done
-    returns a tuple containing 1) the response object created 
-        from parsing the message and 2) the handlers return value
-    """
-    service_response = parse_service_response(message, passphrase)
-    
-    if handle:
-        handler = application.route_message(service_response)
-        handler.set_status(service_response.status_code,  service_response.status_msg)
-        result = handler()
-        #service_client._notify(service_addr, service_response, result)
-        return (service_response, result)
-
-    rerurn (service_response, None)
-
-
 class ServiceClientConnection(ServiceConnection):
     """This class is specific to communicating with a ServiceConnection.
     """
@@ -366,12 +329,30 @@ class ServiceClientConnection(ServiceConnection):
 
         self.zmq = zmq
 
-    def process_message(self, application, message, service_client, service_addr):
-        #without coroutine
-        service_client_process_message(application, message, self.passphrase, service_client, service_addr)
-
-        # with coroutine
-        #coro_spawn(service_client_process_message, application, message, self.passphrase, service_client, service_addr)
+    def process_message(self, application, message, service_client, service_addr, handle=True):
+        """This coroutine looks at the message, determines which handler will
+        be used to process it, and then begins processing.
+        Since this is a reply, not a request,
+        we simply call the handler and are done
+        returns a tuple containing 1) the response object created 
+            from parsing the message and 2) the handlers return value
+        """
+        logging.debug("service_client_process_message")
+        service_response = parse_service_response(message, self.passphrase)
+    
+        logging.debug("service_client_process_message service_response: %s" % service_response)
+        
+        logging.debug("service_client_process_message handle: %s" % handle)
+        if handle:
+            handler = application.route_message(service_response)
+            handler.set_status(service_response.status_code,  service_response.status_msg)
+            result = handler()
+            #service_client._notify(service_addr, service_response, result)
+            logging.debug("service_client_process_message service_response: %s" % service_response)
+            logging.debug("service_client_process_message result: %s" % result)
+            return (service_response, result)
+    
+        return (service_response, None)
 
     def send(self, service_req):
         """Send will wait for a response and return it if async is False
@@ -396,27 +377,13 @@ class ServiceClientConnection(ServiceConnection):
 
         return service_req
 
+    def close(self):
+        # we only have one socket, close it
+        self.out_sock.close()
 
 ##########################################
 ## Handler stuff
 ##########################################
-def service_response_listener(application, service_addr, service_conn):
-    logging.debug("Starting start_service_response_listener");
-    while True:
-        logging.debug("service_response_listener waiting");
-        raw_response = service_conn.recv()
-        #logging.debug("service_response_listener waiting received response: %s" % raw_response);
-        #service_conn.process_message( application, raw_response, 
-        #    service_client, service_addr
-        #    )
-
-        # just send raw mwssage to connection client
-        sender, conn_id = msg.split(' ', 1)
-        
-        conn_id = parse_msgstring(conn_id)[0]
-        service_client._notify(service_addr, service_response, result)
-
-
 class ServiceMessageHandler(MessageHandler):
     """This class is the simplest implementation of a message handlers. 
     Intended to be used for Service inter communication.
@@ -435,7 +402,7 @@ class ServiceMessageHandler(MessageHandler):
 
         body = self._payload
         
-        logging.info('%s %s %s (%s:%s) for (%s:%s)' % (status_code, self.message.method,
+        logging.info('%s %s %s (%s:%s) for (%s:%s)' % (self.status_code, self.message.method,
                                         self.message.path,
                                         self.message.sender,
                                         self.message.conn_id,
@@ -451,109 +418,80 @@ class ServiceClientMixin(object):
         self.application
     """
 
-    # Dicts to hold our registered connections
-    # There may be one per adress
-    # Maybe they should go at the application level, 
-    # but I am treading lightly...
-
-    # holds our registered service connections and corresponding listeners
-    __services = {}  
-
-    def _register_service(self, service_addr, service_passphrase):
-        """ Create and store a connection and it's listener and waiting_sockets queue.
-        To be safe, for now there is no unregister.
-        """ 
-        if service_addr not in self.__services:
-            # create our service connection
-            logging.debug("_register_service creating service_conn: %s" % service_addr)
-            service_conn = ServiceClientConnection(
-                service_addr, service_passphrase, async=True
-            )
-
-            # create and start our listener
-            logging.debug("_register_service starting listener: %s" % service_addr)
-            coro_spawn(service_response_listener, self.application, service_addr)
-            # give above process a chance to start
-            #gevent.sleep(0)
+    @property
+    def zmq(self):
+        if not hasattr(self, '_zmq'):
+            setattr(self, '_zmq', load_zmq())
+        return self._zmq
 
 
-            #service_listener = ServiceClientListener(self.application, service_addr, service_conn, self)
-            #service_listener.start()
-            #service_listener.join()
-
-            # add us to the list
-            self.__services[service_addr] = {
-                'conns': service_conn,
-                #'service_listener': service_listener ,
-                'waiting_sockets': {},
-            }
-            logging.debug("_register_service success: %s" % service_addr)
-        else:
-            logging.debug("_register_service ignored: %s already registered" % service_addr)
-
-    def _get_conn_info(self, service_addr):
-        if service_addr in self.__services:
-            return self.__services[service_addr]
-        else:
-            raise Exception("%s service not registered" % service_addr)
-
-    def _get_conn(self, service_addr):
-        return self._get_conn_info(service_addr)['conns']
-
-    def _send(self, service_addr, service_req):
-        """send our message, used internally only"""
-        conn = self._get_conn(service_addr)
-        return conn.send(service_req, this.zmq.NOBLOCK)
-    
-    def _get_waiting_sockets(self, service_addr):
-        return self._get_conn_info(service_addr)['waiting_sockets']
+    @property
+    def zmq_ctx(self):
+        if not hasattr(self, '_zmq_ctx'):
+            setattr(self, '_zmq_ctx', load_zmq_ctx())
+        return self._zmq_ctx
 
     def _wait(self, service_addr, conn_id):
         # use an inproc socket, naturally non-blocking blocking
         # in memory sending, cheap
-        zmq = load_zmq()
-        ctx = load_zmq_ctx()
+        zmq = self.zmq
+        ctx = self.zmq_ctx
+        conn_id = str(conn_id)
+        rep_sock = ctx.socket(zmq.REP)
+        logging.debug("starting internal reply socket %s" % conn_id)
 
-        rep_sock = ctx.socket(zmq.REQ)
-        rep_sock.bind('inproc://%s' % conn_id)
-        waiting_sockets = self._get_waiting_sockets(service_addr)
-        waiting_sockets[conn_id] = rep_sock
+        req_sock = ctx.socket(zmq.REQ)
+        req_sock.bind('inproc://%s' % conn_id)
 
-        req_sock = ctx.socket(zmq.REP)
-        req_sock.connect('inproc://%s' % conn_id)
+        rep_sock.connect('inproc://%s' % conn_id)
+
+        waiting_sockets = self.application.get_waiting_sockets(service_addr)
+        waiting_sockets[conn_id] = req_sock
 
         poller = zmq.Poller()
-        poller.register(req_sock, zmq.POLLIN)
+        poller.register(rep_sock, zmq.POLLIN)
+
         # Loop and accept messages from both channels, acting accordingly
 
-        socks = dict(poller.poll(100))
-        if socks:
-            if socks.get(req_sock) == zmq.POLLIN:
-                raw_response = req_sock.recv(zmq.NOBLOCK)
-            else:
-                logging.debug("error: message timeout")
-
-        # close the sockets, we are done with it
-        # maybe we should have a pool ...
-        req_sock.close()
-        rep_sock.close()
         
-        del waiting_sockets[conn_id]
+        #sockets = poller.poll(30000)
+        raw_response = None
 
-        results = service_conn.process_message( application, raw_response, 
-            self, service_addr
-            )
+        if False:
+            #logging.debug("sockets: %s" % sockets)
+            #try:
+            #    if rep_sock in sockets:
+            try:
+                max_retries = 20
+                retries = 0
+                while retries < max_retries:
+                    logging.debug("poller start")
+                    sockets = dict(poller.poll(500))
+                    logging.debug("poller stop")
+                    retries += 1
+                    logging.debug("sockets: %s" % sockets)
+                    if rep_sock in sockets:
+                        if sockets[rep_sock] == zmq.POLLIN:
+                            raw_response = sockets[rep_sock].recv(zmq.NOWAIT)
+            finally:
+                rep_sock.close()
+                logging.debug("closed internal reply socket %s" % conn_id)
+                req_sock.close()
+                logging.debug("closed internal request socket %s" % conn_id)
 
-        return results
-            
-    def _notify(self, service_addr, conn_id, raw_results):
-        waiting_sockets = self._get_waiting_sockets(service_addr)
+        raw_response = rep_sock.recv()
 
-        if conn_id in waiting_sockets:
-            waiting_sockets[conn_id].send(raw_results)
+        if raw_response is not None:
+            service_conn = self.application.get_service_conn(service_addr)
+            logging.debug("process_message %s,%s,%s,%s" % (self.application, raw_response, self, service_addr))
+            results = service_conn.process_message( self.application, raw_response, 
+                self, service_addr
+                )
+            #logging.debug("RESULTS: %s" % results)
+            return results
         else:
-            logging.debug("conn_id %s not found to notify." % conn_id)
- 
+            logging.debug("NO RESULTS")
+            return (None, None)
     ################################
     ## The public interface methods
     ## This is all your handlers should use
@@ -586,8 +524,14 @@ class ServiceClientMixin(object):
         return ServiceRequest(**data)
     
     def register_service(self, service_addr, service_passphrase):
-        """just a wrapper for our internal_register_service method right now"""
-        return self._register_service(service_addr, service_passphrase)
+        """just a wrapper for our application level register_service method right now"""
+        if not self.application.service_is_registered(service_addr):
+            service_conn = ServiceClientConnection(
+                service_addr, service_passphrase, async=True
+            )
+            return self.application.register_service(service_addr, service_conn)
+        logging.debug("Service %s already registered" % service_addr)
+        return True
 
     def forward(self, service_addr, service_req):
         """give up any responsability for the request, someone else will respond to the client
@@ -600,7 +544,7 @@ class ServiceClientMixin(object):
         """do some work and wait for the results of the response to handle the response from the service
         blocking, waits for handled result.
         """
-        service_req = self._send(service_addr, service_req, this.zmq.NOBLOCK)
+        service_req = self.application.send_service_request(service_addr, service_req)
         conn_id = service_req.conn_id
         (response, handler_response) = self._wait(service_addr, conn_id)
 
@@ -610,8 +554,5 @@ class ServiceClientMixin(object):
         """defer some work, but still handle the response yourself
         non-blocking, returns immediately.
         """
-        self._send(service_addr, service_req)
+        self.application.send_service_request(service_addr, service_req)
         return
-
-
-      
