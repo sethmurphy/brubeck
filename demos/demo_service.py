@@ -11,16 +11,17 @@ from brubeck.templating import (
     load_jinja2_env,
 )
 
+
 class SlowEchoServiceHandler(ServiceMessageHandler):
-    """A sevice to uplaod an image, process it and push it to S3"""
-    
+    """A slow service"""
+
     def request(self):
+        """do something and take too long"""
         time.sleep(5)
         self.set_status(200, "Took a while, but I am back.")
         self.add_to_payload("RETURN_DATA", self.message.body["RETURN_DATA"])
         self.headers = {"METHOD": "response"}
         return self.render()
-
 
 
 ##
@@ -36,6 +37,7 @@ config = {
     'template_loader': load_jinja2_env('./templates/service'),
     'log_level': logging.DEBUG,
 }
+
 
 ##
 ## get us started!
