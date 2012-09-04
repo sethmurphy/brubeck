@@ -40,7 +40,7 @@ def parse_service_request(msg, passphrase):
     """Static method for constructing a Request instance out of a
     message read straight off a zmq socket from a ServiceClientConnection.
     """
-    #logging.debug("parse_service_request: %s" % msg)
+    logging.debug("parse_service_request: %s" % msg)
     sender, conn_id, msg_passphrase, origin_sender_id, origin_conn_id, origin_out_addr, path, rest = msg.split(' ', 7)
 
     conn_id = parse_msgstring(conn_id)[0]
@@ -144,8 +144,6 @@ class ServiceRequest(Document):
     def method(self):
         return self.headers["METHOD"]
 
-    # this is used internally and should never change
-    sender = StringField(required=True)
     # this is set by the send call in the client connection
     sender = StringField(required=True)
     # this is set by the send call in the client connection
@@ -259,23 +257,26 @@ class ServiceConnection(ZMQConnection):
             len(body), body,
         )
         
-        #logging.debug("ServiceConnection send: %s" % msg)
-        
+        logging.debug("ServiceConnection send (%s) : %s" % (service_response.sender, msg))
+
         self.out_sock.send(service_response.sender, self.zmq.SNDMORE)
         self.out_sock.send("", self.zmq.SNDMORE)
-        self.out_sock.send(msg)
+        self.out_sock.send(msg, self.zmq.NOBLOCK)
         return
-        
+
     def recv(self):
         """Receives a message from a ServiceClientConnection.
         """
-
         # blocking recv call
+        logging.debug("recv waiting...")
         zmq_msg = self.in_sock.recv()
+        logging.debug("...recv got")
         # if we are multipart, keep getting our message until we are done
         while self.in_sock.getsockopt(self.zmq.RCVMORE):
+            logging.debug("...recv getting more")
             zmq_msg += self.in_sock.recv()
-
+        logging.debug("...recv got all")
+        
         return zmq_msg
 
 
@@ -284,39 +285,22 @@ class ServiceClientConnection(ServiceConnection):
     """This class is specific to communicating with a ServiceConnection.
     """
 
-    def __init__(self, svc_addr, passphrase, async=False):
+    def __init__(self, svc_addr, passphrase):
         """ passphrase = unique ID that both the client and server need to match
                 for security purposed
 
             svc_addr = address of the Brubeck Service we are connecting to
             This socket is used for both inbound and outbound messages
-
-            async = should the message be async or not
-                If async is True then send() returns the response and
-                the same client is guaranteed to receive the response
-    
-                If async is False then send() returns immediately and a
-                DEALER socket is used, meaning the response may be handled 
-                by any connected clients using fair-queuing
-                
-                The default is to make a syncronouse service request which
-                enables you to offload processor intensive actions 
-                so the initial brubeck instance is as non-blocking as possible
-                for the request.
         """
 
         self.passphrase = passphrase
         self.sender_id = str(uuid4())
         
-        self.async = async
-
         zmq = load_zmq()
         ctx = load_zmq_ctx()
 
-        if async:
-            in_sock = ctx.socket(zmq.DEALER)
-        else:
-            in_sock = ctx.socket(zmq.REQ)
+        in_sock = ctx.socket(zmq.DEALER)
+            
         out_sock = in_sock
 
         out_sock.setsockopt(zmq.IDENTITY, self.sender_id)
@@ -347,7 +331,6 @@ class ServiceClientConnection(ServiceConnection):
             handler = application.route_message(service_response)
             handler.set_status(service_response.status_code,  service_response.status_msg)
             result = handler()
-            #service_client._notify(service_addr, service_response, result)
             logging.debug("service_client_process_message service_response: %s" % service_response)
             logging.debug("service_client_process_message result: %s" % result)
             return (service_response, result)
@@ -355,7 +338,7 @@ class ServiceClientConnection(ServiceConnection):
         return (service_response, None)
 
     def send(self, service_req):
-        """Send will wait for a response and return it if async is False
+        """Send will wait for a response with a listener and is async
         """
         service_req.conn_id = str(uuid4())
 
@@ -372,7 +355,7 @@ class ServiceClientConnection(ServiceConnection):
         body = to_bytes(json.dumps(service_req.body))
 
         msg = ' %s %d:%s%d:%s' % (header, len(headers), headers, len(body), body)
-        #logging.debug("ServiceClientConnection send: %s" % msg)
+        logging.debug("ServiceClientConnection send (%s): %s" % (service_req.conn_id, msg))
         self.out_sock.send(msg)
 
         return service_req
@@ -436,50 +419,28 @@ class ServiceClientMixin(object):
         # in memory sending, cheap
         zmq = self.zmq
         ctx = self.zmq_ctx
+        raw_response = None
         conn_id = str(conn_id)
-        rep_sock = ctx.socket(zmq.REP)
+
         logging.debug("starting internal reply socket %s" % conn_id)
+        req_sock = ctx.socket(zmq.PAIR)
+        rep_sock = ctx.socket(zmq.PAIR)
 
-        req_sock = ctx.socket(zmq.REQ)
         req_sock.bind('inproc://%s' % conn_id)
-
         rep_sock.connect('inproc://%s' % conn_id)
 
         waiting_sockets = self.application.get_waiting_sockets(service_addr)
         waiting_sockets[conn_id] = req_sock
 
-        poller = zmq.Poller()
-        poller.register(rep_sock, zmq.POLLIN)
-
-        # Loop and accept messages from both channels, acting accordingly
-
-        
-        #sockets = poller.poll(30000)
-        raw_response = None
-
-        if False:
-            #logging.debug("sockets: %s" % sockets)
-            #try:
-            #    if rep_sock in sockets:
-            try:
-                max_retries = 20
-                retries = 0
-                while retries < max_retries:
-                    logging.debug("poller start")
-                    sockets = dict(poller.poll(500))
-                    logging.debug("poller stop")
-                    retries += 1
-                    logging.debug("sockets: %s" % sockets)
-                    if rep_sock in sockets:
-                        if sockets[rep_sock] == zmq.POLLIN:
-                            raw_response = sockets[rep_sock].recv(zmq.NOWAIT)
-            finally:
-                rep_sock.close()
-                logging.debug("closed internal reply socket %s" % conn_id)
-                req_sock.close()
-                logging.debug("closed internal request socket %s" % conn_id)
-
-        raw_response = rep_sock.recv()
+        try:
+            logging.debug("internal socket %s waiting" % conn_id)
+            raw_response = rep_sock.recv()
+            logging.debug("internal socket %s receiving" % conn_id)
+        finally:
+            rep_sock.close()
+            logging.debug("closed internal reply socket %s" % conn_id)
+            req_sock.close()
+            logging.debug("closed internal request socket %s" % conn_id)
 
         if raw_response is not None:
             service_conn = self.application.get_service_conn(service_addr)
@@ -487,7 +448,6 @@ class ServiceClientMixin(object):
             results = service_conn.process_message( self.application, raw_response, 
                 self, service_addr
                 )
-            #logging.debug("RESULTS: %s" % results)
             return results
         else:
             logging.debug("NO RESULTS")
@@ -527,7 +487,7 @@ class ServiceClientMixin(object):
         """just a wrapper for our application level register_service method right now"""
         if not self.application.service_is_registered(service_addr):
             service_conn = ServiceClientConnection(
-                service_addr, service_passphrase, async=True
+                service_addr, service_passphrase
             )
             return self.application.register_service(service_addr, service_conn)
         logging.debug("Service %s already registered" % service_addr)

@@ -13,6 +13,7 @@ See github.com/j2labs/brubeck for more information.
 
 ### Attempt to setup gevent
 try:
+    import gevent
     from gevent import monkey
     monkey.patch_all()
     from gevent import pool
@@ -22,6 +23,9 @@ try:
 
     def coro_spawn(function, app, message, *a, **kw):
         app.pool.spawn(function, app, message, *a, **kw)
+
+    def coro_sleep(secs):
+        gevent.sleep(secs)
 
     CORO_LIBRARY = 'gevent'
 
@@ -35,6 +39,9 @@ except ImportError:
 
         def coro_spawn(function, app, message, *a, **kw):
             app.pool.spawn_n(function, app, message, *a, **kw)
+
+        def coro_sleep(secs):
+            eventlet.sleep(secs)
 
         CORO_LIBRARY = 'eventlet'
 
@@ -636,7 +643,7 @@ def service_response_listener(application, service_addr, service_conn):
         sender, conn_id = raw_response.split(' ', 1)
         
         conn_id = parse_msgstring(conn_id)[0]
-        application.notify(service_addr, conn_id, raw_response)
+        application.notify_service_client(service_addr, conn_id, raw_response)
     ##except:
     ##    raise
     ##finally:
@@ -898,7 +905,7 @@ class Brubeck(object):
             logging.debug("register_service starting listener: %s" % service_addr)
             coro_spawn(service_response_listener, self, service_addr, service_conn)
             # give above process a chance to start
-            #gevent.sleep(0)
+            coro_sleep(0)
 
 
             #service_listener = ServiceClientListener(self.application, service_addr, service_conn, self)
@@ -959,7 +966,7 @@ class Brubeck(object):
     def get_waiting_sockets(self, service_addr):
         return self.get_service_info(service_addr)['waiting_sockets']
 
-    def notify(self, service_addr, conn_id, raw_results):
+    def notify_service_client(self, service_addr, conn_id, raw_results):
         logging.debug("NOTIFY: %s: %s (%s)" % (service_addr, conn_id, raw_results))
         waiting_sockets = self.get_waiting_sockets(service_addr)
         logging.debug("waiting_sockets: %s" % (waiting_sockets))
@@ -967,6 +974,8 @@ class Brubeck(object):
         if conn_id in waiting_sockets:
             logging.debug("conn_id %s found to notify(%s)" % (conn_id,waiting_sockets[conn_id]))
             waiting_sockets[conn_id].send(raw_results)
+            logging.debug("conn_id %s sent to: %s" % (conn_id, raw_results))
+            coro_sleep(0)
         else:
             logging.debug("conn_id %s not found to notify." % conn_id)
 
