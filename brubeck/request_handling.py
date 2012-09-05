@@ -886,6 +886,10 @@ class Brubeck(object):
     ##########################################################################
 
 
+    def registered_services(self):
+        """Access to our registered services""" 
+        return self._services
+        
     def service_is_registered(self, service_addr):
         """ Check if a service is registered""" 
         if service_addr in self._services:
@@ -895,7 +899,6 @@ class Brubeck(object):
 
     def register_service(self, service_addr, service_conn):
         """ Create and store a connection and it's listener and waiting_sockets queue.
-        To be safe, for now there is no unregister.
         """ 
         if service_addr not in self._services:
             # create our service connection
@@ -907,15 +910,9 @@ class Brubeck(object):
             # give above process a chance to start
             coro_sleep(0)
 
-
-            #service_listener = ServiceClientListener(self.application, service_addr, service_conn, self)
-            #service_listener.start()
-            #service_listener.join()
-
             # add us to the list
             self._services[service_addr] = {
                 'service_conn': service_conn,
-                #'service_listener': service_listener ,
                 'waiting_sockets': {},
             }
             logging.debug("register_service success: %s" % service_addr)
@@ -973,7 +970,7 @@ class Brubeck(object):
         conn_id = str(conn_id)
         if conn_id in waiting_sockets:
             logging.debug("conn_id %s found to notify(%s)" % (conn_id,waiting_sockets[conn_id]))
-            waiting_sockets[conn_id].send(raw_results)
+            waiting_sockets[conn_id][1].send(raw_results)
             logging.debug("conn_id %s sent to: %s" % (conn_id, raw_results))
             coro_sleep(0)
         else:

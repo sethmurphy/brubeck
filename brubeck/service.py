@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import time
 import ujson as json
 
 from connections import (
@@ -41,23 +42,28 @@ def parse_service_request(msg, passphrase):
     message read straight off a zmq socket from a ServiceClientConnection.
     """
     logging.debug("parse_service_request: %s" % msg)
-    sender, conn_id, msg_passphrase, origin_sender_id, origin_conn_id, origin_out_addr, path, rest = msg.split(' ', 7)
+    sender, conn_id, start_timestamp, end_timestamp, msg_passphrase, origin_sender_id, origin_conn_id, origin_out_addr, path, method, rest = msg.split(' ', 10)
 
     conn_id = parse_msgstring(conn_id)[0]
+    start_timestamp = parse_msgstring(start_timestamp)[0]
+    end_timestamp = parse_msgstring(end_timestamp)[0]
     msg_passphrase = parse_msgstring(msg_passphrase)[0]
     origin_sender_id = parse_msgstring(origin_sender_id)[0]
     origin_conn_id = parse_msgstring(origin_conn_id)[0]
     origin_out_addr = parse_msgstring(origin_out_addr)[0]
     path = parse_msgstring(path)[0]
+    method = parse_msgstring(method)[0]
     
     if msg_passphrase != passphrase:
         raise Exception('Unknown service identity! (%s != %s)' % (str(msg_passphrase),str(passphrase)))
 
+    arguments, body = parse_msgstring(rest)
     headers, body = parse_msgstring(rest)
     body = parse_msgstring(body)[0]
 
-    headers = json.loads(headers)
-    body = json.loads(body)
+    arguments = json.loads(arguments) if len(arguments) > 0 else {}
+    headers = json.loads(headers) if len(headers) > 0 else {}
+    body = json.loads(body) if len(body) > 0 else {}
 
     r = ServiceRequest(**{
             "sender": sender,
@@ -66,13 +72,17 @@ def parse_service_request(msg, passphrase):
             "origin_conn_id": origin_conn_id,
             "origin_out_addr": origin_out_addr,
             "path": path,
+            "method": method,
+            "arguments": arguments,
             "headers": headers,
             "body": body,
+            "start_timestamp": start_timestamp,
+            "end_timestamp": end_timestamp,
     })
 
     return r
 
-def create_service_response(service_request, handler, msg={}, headers={"METHOD": _DEFAULT_SERVICE_RESPONSE_METHOD}):
+def create_service_response(service_request, handler, method=_DEFAULT_SERVICE_REQUEST_METHOD, arguments={}, msg={}, headers={}):
 
     if not isinstance(headers, dict):
         headers = json.loads(headers)
@@ -86,6 +96,8 @@ def create_service_response(service_request, handler, msg={}, headers={"METHOD":
         "origin_conn_id": service_request.origin_conn_id,
         "origin_out_addr": service_request.origin_out_addr,
         "path": service_request.path,
+        "method": method,
+        "arguments": arguments,
         "headers": headers,
         "body": msg,
         "status_code": handler.status_code,
@@ -100,36 +112,44 @@ def parse_service_response(msg, passphrase):
     """
     #logging.debug("parse_service_response: %s" % msg)
 
-    sender, conn_id, msg_passphrase, origin_sender_id, origin_conn_id, origin_out_addr, path, rest = msg.split(' ', 7)
+    sender, conn_id, start_timestamp, end_timestamp, msg_passphrase, origin_sender_id, origin_conn_id, origin_out_addr, path, method, rest = msg.split(' ', 10)
     
     conn_id = parse_msgstring(conn_id)[0]
+    start_timestamp = parse_msgstring(start_timestamp)[0]
+    end_timestamp = parse_msgstring(end_timestamp)[0]
     msg_passphrase = parse_msgstring(msg_passphrase)[0]
     origin_sender_id = parse_msgstring(origin_sender_id)[0]
     origin_conn_id = parse_msgstring(origin_conn_id)[0]
     origin_out_addr = parse_msgstring(origin_out_addr)[0]
     path = parse_msgstring(path)[0]
+    method = parse_msgstring(method)[0]
     
     if msg_passphrase != passphrase:
         raise Exception('Unknown service identity! (%s != %s)' % (str(msg_passphrase),str(passphrase)))
 
     (status_code, rest) = parse_msgstring(rest)
     (status_msg, rest) = parse_msgstring(rest)
+    (arguments, rest) = parse_msgstring(rest)
     (headers, rest) = parse_msgstring(rest)
     (body, rest) = parse_msgstring(rest)
 
-    headers = json.loads(headers)
-    body = json.loads(body)
+    arguments = json.loads(arguments) if len(arguments) > 0 else {}
+    headers = json.loads(headers) if len(headers) > 0 else {}
+    body = json.loads(body) if len(body) > 0 else {}
 
     service_response = ServiceResponse(**{
         "sender": sender, 
         "conn_id": conn_id, 
         "path": path, 
+        "method": method, 
         "origin_conn_id": origin_conn_id, 
         "origin_out_addr": origin_out_addr, 
         "status_code": int(status_code), 
         "status_msg": status_msg,
+        "arguments": arguments, 
         "headers": headers, 
         "body": body, 
+        "start_timestamp": start_timestamp,
     })
     return service_response
 
@@ -139,10 +159,6 @@ class ServiceRequest(Document):
     """
     # this is used internally and should never change
     message_type = MessageHandler._SERVICE_MESSAGE_TYPE
-
-    @property
-    def method(self):
-        return self.headers["METHOD"]
 
     # this is set by the send call in the client connection
     sender = StringField(required=True)
@@ -156,16 +172,36 @@ class ServiceRequest(Document):
     origin_out_addr  = StringField(required=True)
     # used to route the request
     path = StringField(required=True)
+    # used to route the request to teh proper method of the handler
+    method = StringField(required=True)
+    # a dict, used to populat an arguments dict for use within the method
+    arguments = DictField(required=False)
     # a dict, right now only METHOD is required and must be one of: ['get', 'post', 'put', 'delete','options', 'connect', 'response', 'request']
     headers = DictField(required=False)
     # a dict, this can be whatever you need it to be to get the job done.
     body = DictField(required=True)
+
+    def __init__(self, *args, **kwargs):
+        self.start_timestamp = int(time.time() * 1000)
+        self.end_timestamp = self.start_timestamp
+        super(ServiceRequest, self).__init__(*args, **kwargs)
+
+    def get_argument(self, key, default=None):
+        """get's an argument by name"""
+        if key in self.arguments:
+            return self.arguments[key]
+        return default
+
 
 class ServiceResponse(ServiceRequest):
     """used to construct a Brubeck service response message.
     """
     status_code = IntField(required=True)
     status_message = StringField()
+    def __init__(self, *args, **kwargs):
+        self.start_timestamp = int(time.time() * 1000)
+        self.end_timestamp = self.start_timestamp
+        super(ServiceResponse, self).__init__(*args, **kwargs)
 
 ######################################################################################
 ## Brubeck service connections (service, client and mongrel2 with greenlet handlers)
@@ -225,8 +261,7 @@ class ServiceConnection(ZMQConnection):
     
         if result is not None and result is not "":
             msg = json.dumps(result)
-    
-        service_response = create_service_response(service_request, handler, msg)
+        service_response = create_service_response(service_request, handler, method='response', arguments={}, msg=msg, headers={})
             
         application.msg_conn.send(service_response)
 
@@ -240,19 +275,26 @@ class ServiceConnection(ZMQConnection):
            path = the path used to route to the proper response handler
         """
 
-        header = "%s %d:%s %d:%s %d:%s %d:%s %d:%s %d:%s" % ( service_response.sender,
+        header = "%s %d:%s %d:%s %d:%s %d:%s %d:%s %d:%s %d:%s %d:%s %d:%s" % ( service_response.sender,
             len(str(service_response.conn_id)), str(service_response.conn_id),
+            len(str(service_response.start_timestamp)), str(service_response.start_timestamp),
+            len(str(service_response.end_timestamp)), str(service_response.end_timestamp),
             len(self.passphrase), self.passphrase,
             len(service_response.origin_sender_id), service_response.origin_sender_id,
             len(str(service_response.origin_conn_id)), str(service_response.origin_conn_id),
             len(service_response.origin_out_addr), service_response.origin_out_addr,
-            len(service_response.path), service_response.path
+            len(service_response.path), service_response.path,
+            len(service_response.method), service_response.method,
         )
+        status_code = to_bytes(str(json.dumps(service_response.status_code)))
+        status_msg = to_bytes(json.dumps(service_response.status_msg))
+        arguments = to_bytes(json.dumps(service_response.arguments))
         headers = to_bytes(json.dumps(service_response.headers))
         body = to_bytes(json.dumps(service_response.body))
-        msg = '%s %d:%s%d:%s%d:%s%d:%s' % (header,
-            len(str(service_response.status_code)), to_bytes(str(service_response.status_code)),
-            len(service_response.status_msg), to_bytes(service_response.status_msg),
+        msg = '%s %d:%s%d:%s%d:%s%d:%s%d:%s' % (header,
+            len(status_code), status_code,
+            len(status_msg), status_msg,
+            len(arguments), arguments,
             len(headers), headers,
             len(body), body,
         )
@@ -343,18 +385,22 @@ class ServiceClientConnection(ServiceConnection):
         service_req.conn_id = str(uuid4())
 
 
-        header = "%d:%s %d:%s %d:%s %d:%s %d:%s %d:%s" % (
+        header = "%d:%s %d:%s %d:%s %d:%s %d:%s %d:%s %d:%s %d:%s %d:%s" % (
             len(str(service_req.conn_id)), str(service_req.conn_id),
+            len(str(service_req.start_timestamp)), str(service_req.start_timestamp),
+            len(str(service_req.end_timestamp)), str(service_req.end_timestamp),
             len(str(self.passphrase)), str(self.passphrase),
             len(service_req.origin_sender_id),service_req.origin_sender_id,
             len(str(service_req.origin_conn_id)), str(service_req.origin_conn_id),
             len(service_req.origin_out_addr), service_req.origin_out_addr,
             len(service_req.path), service_req.path,
+            len(service_req.method), service_req.method,
         )
+        arguments = to_bytes(json.dumps(service_req.arguments))
         headers = to_bytes(json.dumps(service_req.headers))
         body = to_bytes(json.dumps(service_req.body))
 
-        msg = ' %s %d:%s%d:%s' % (header, len(headers), headers, len(body), body)
+        msg = ' %s %d:%s%d:%s%d:%s' % (header, len(arguments), arguments,len(headers), headers, len(body), body)
         logging.debug("ServiceClientConnection send (%s): %s" % (service_req.conn_id, msg))
         self.out_sock.send(msg)
 
@@ -430,7 +476,7 @@ class ServiceClientMixin(object):
         rep_sock.connect('inproc://%s' % conn_id)
 
         waiting_sockets = self.application.get_waiting_sockets(service_addr)
-        waiting_sockets[conn_id] = req_sock
+        waiting_sockets[conn_id] = (int(time.time()), req_sock)
 
         try:
             logging.debug("internal socket %s waiting" % conn_id)
@@ -457,10 +503,15 @@ class ServiceClientMixin(object):
     ## This is all your handlers should use
     ################################
 
-    def create_service_request(self, path, headers, msg):
+    def create_service_request(self, path, method=_DEFAULT_SERVICE_REQUEST_METHOD, arguments={}, msg={}, headers={}):
         """ path - string, used to route to proper handler
-            headers - dict, contains the accepted method to call on handler
-            msg - dict, the body of the message to process
+            method - used to map to the proper method of the handler
+            arguments - dict, used within the method call if needed
+            These are not used anymore, but I feel they belong. 
+
+            If not to only hold the original request
+                headers - dict, contains the accepted method to call on handler
+                msg - dict, the body of the message to process
         """
         if not isinstance(headers, dict):
             headers = json.loads(headers)
@@ -476,6 +527,8 @@ class ServiceClientMixin(object):
             "origin_out_addr": self.application.msg_conn.out_addr,
             # used to route the request
             "path": path,
+            "method": method,
+            "arguments": arguments,
             # a dict, right now only METHOD is required and must be one of: ['get', 'post', 'put', 'delete','options', 'connect', 'response', 'request']
             "headers": headers,
             # a dict, this can be whatever you need it to be to get the job done.

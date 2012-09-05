@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 import logging
+import time
 from brubeck.connections import Mongrel2CoConnection
 from brubeck.request_handling import (
     JSONMessageHandler,
@@ -19,10 +20,10 @@ from brubeck.templating import (
 service_addr = "ipc://run/slow"
 service_passphrase = "my_shared_secret"
 service_path = '/service/slow'
-request_headers = {"METHOD":'request'}
-sync_request_body  = {"RETURN_DATA": 'I made a round trip, it took a while and I have a great story.'}
-async_request_body = {"RETURN_DATA": 'I made a round trip, it took so long and everyone is gone now.'}
-
+request_headers = {}
+request_method = 'request'
+sync_request_arguments  = {"RETURN_DATA": 'I made a round trip, it took a while but I bring results.'}
+async_request_arguments = {"RETURN_DATA": 'I made a round trip, it took so long I will respond to no one.'}
 
 class DemoHandler(
         Jinja2Rendering,
@@ -31,7 +32,11 @@ class DemoHandler(
 
     def get(self):
         # just return a page with some links
-        return self.render_template('index.html')
+        context = {
+            'name': "Async is faster, but ... nothing to report on my trip.",
+        }
+
+        return self.render_template('index.html', **context)
 
 class CallServiceAsyncHandler(
         Jinja2Rendering,
@@ -45,8 +50,8 @@ class CallServiceAsyncHandler(
         # create a servicerequest
         service_request = self.create_service_request(
             service_path, 
-            request_headers, 
-            async_request_body
+            request_method, 
+            async_request_arguments
         )
 
         ## Async
@@ -72,8 +77,8 @@ class CallServiceSyncHandler(
         # create a servicerequest
         service_request = self.create_service_request(
             service_path, 
-            request_headers, 
-            sync_request_body
+            request_method, 
+            sync_request_arguments
         )
         
         
@@ -89,6 +94,7 @@ class CallServiceSyncHandler(
         context = {
             'name': response.body["RETURN_DATA"],
         }
+        logging.debug("service_infos: %s" % self.application._services)
         return self.render_template('success.html', **context)
 
 class ServiceResponseHandler(ServiceMessageHandler):

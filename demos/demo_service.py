@@ -19,7 +19,7 @@ class SlowEchoServiceHandler(ServiceMessageHandler):
         """do something and take too long"""
         time.sleep(5)
         self.set_status(200, "Took a while, but I am back.")
-        self.add_to_payload("RETURN_DATA", self.message.body["RETURN_DATA"])
+        self.add_to_payload("RETURN_DATA", self.message.get_argument("RETURN_DATA", "NO DATA"))
         self.headers = {"METHOD": "response"}
         return self.render()
 
