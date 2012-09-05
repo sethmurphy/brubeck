@@ -339,3 +339,23 @@ Brubeck comes with the above example complete as a demo.
 
 * [Demo Service](https://github.com/sethmurphy/brubeck/blob/brubeck-service/demos/demo_service.py)
 * [Demo Service Client](https://github.com/sethmurphy/brubeck/blob/brubeck-service/demos/demo_service_client.py)
+
+To run the demos you need three windows.
+
+1.  Run mongrel2 in one shell instance.
+
+    cd demos
+    m2sh load -config mongrel2.conf -db the.db
+    m2sh start -db the.db -host localhost
+
+2.  Run the Brubeck Service in another shell instance.
+
+    cd demos
+    ./demo_service.py
+
+3.  Run the Brubeck Service in another shell instance.
+
+    cd demos
+    ./demo_service_client.py
+
+4.  Open a browser and navigate to `http://localhost:6767/`
