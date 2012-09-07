@@ -1,6 +1,5 @@
 #!/usr/bin/env python
 
-
 """Brubeck is a coroutine oriented zmq message handling framework. I learn by
 doing and this code base represents where my mind has wandered with regard to
 concurrency.
@@ -16,6 +15,7 @@ try:
     import gevent
     from gevent import monkey
     monkey.patch_all()
+    from gevent.event import AsyncResult
     from gevent import pool
     from gevent import Greenlet
 
@@ -27,12 +27,20 @@ try:
     def coro_sleep(secs):
         gevent.sleep(secs)
 
+    def coro_get_event():
+        return AsyncResult()
+
+    def coro_send_event(e, value):
+        e.set(value)
+
+
     CORO_LIBRARY = 'gevent'
 
 ### Fallback to eventlet
 except ImportError:
     try:
         import eventlet
+        from eventlet import event
         eventlet.patcher.monkey_patch(all=True)
 
         coro_pool = eventlet.GreenPool
@@ -42,6 +50,12 @@ except ImportError:
 
         def coro_sleep(secs):
             eventlet.sleep(secs)
+
+        def coro_get_event():
+            return Event()
+
+        def coro_send_event(e, value):
+            e.send(value)
 
         CORO_LIBRARY = 'eventlet'
 
@@ -898,7 +912,7 @@ class Brubeck(object):
             return False
 
     def register_service(self, service_addr, service_conn):
-        """ Create and store a connection and it's listener and waiting_sockets queue.
+        """ Create and store a connection and it's listener and waiting_clients queue.
         """ 
         if service_addr not in self._services:
             # create our service connection
@@ -913,7 +927,7 @@ class Brubeck(object):
             # add us to the list
             self._services[service_addr] = {
                 'service_conn': service_conn,
-                'waiting_sockets': {},
+                'waiting_clients': {},
             }
             logging.debug("register_service success: %s" % service_addr)
         else:
@@ -921,7 +935,7 @@ class Brubeck(object):
         return True
 
     def unregister_service(self, service_addr):
-        """ Create and store a connection and it's listener and waiting_sockets queue.
+        """ Create and store a connection and it's listener and waiting_clients queue.
         To be safe, for now there is no unregister.
         """ 
         if service_addr not in self._services:
@@ -931,11 +945,11 @@ class Brubeck(object):
             service_info = self._services[service_addr]
             # make sure we don't get new requests
             service_conn = service_info['service_conn']
-            waiting_sockets = service_info['waiting_sockets']
+            waiting_clients = service_info['waiting_clients']
 
 
             service_conn.close()
-            for sock in waiting_sockets:
+            for sock in waiting_clients:
                 logging.debug("killing internal reply socket %s" % sock)
                 sock.close()
 
@@ -960,17 +974,17 @@ class Brubeck(object):
         service_conn = self.get_service_conn(service_addr)
         return service_conn.send(service_req)
     
-    def get_waiting_sockets(self, service_addr):
-        return self.get_service_info(service_addr)['waiting_sockets']
+    def get_waiting_clients(self, service_addr):
+        return self.get_service_info(service_addr)['waiting_clients']
 
     def notify_service_client(self, service_addr, conn_id, raw_results):
         logging.debug("NOTIFY: %s: %s (%s)" % (service_addr, conn_id, raw_results))
-        waiting_sockets = self.get_waiting_sockets(service_addr)
-        logging.debug("waiting_sockets: %s" % (waiting_sockets))
+        waiting_clients = self.get_waiting_clients(service_addr)
+        logging.debug("waiting_clients: %s" % (waiting_clients))
         conn_id = str(conn_id)
-        if conn_id in waiting_sockets:
-            logging.debug("conn_id %s found to notify(%s)" % (conn_id,waiting_sockets[conn_id]))
-            waiting_sockets[conn_id][1].send(raw_results)
+        if conn_id in waiting_clients:
+            logging.debug("conn_id %s found to notify(%s)" % (conn_id,waiting_clients[conn_id]))
+            coro_send_event(waiting_clients[conn_id][1], raw_results)
             logging.debug("conn_id %s sent to: %s" % (conn_id, raw_results))
             coro_sleep(0)
         else:

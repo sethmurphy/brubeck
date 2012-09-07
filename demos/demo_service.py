@@ -1,9 +1,13 @@
 #!/usr/bin/env python
 import logging
 import time
-from brubeck.request_handling import Brubeck
+from brubeck.request_handling import (
+    Brubeck,
+    coro_sleep,
+)
 from brubeck.service import (
     ServiceConnection,
+    ServiceCoConnection,
     ServiceMessageHandler,
 )
 from brubeck.templating import (
@@ -17,7 +21,7 @@ class SlowEchoServiceHandler(ServiceMessageHandler):
 
     def request(self):
         """do something and take too long"""
-        time.sleep(5)
+        coro_sleep(5)
         self.set_status(200, "Took a while, but I am back.")
         self.add_to_payload("RETURN_DATA", self.message.get_argument("RETURN_DATA", "NO DATA"))
         self.headers = {"METHOD": "response"}
@@ -28,7 +32,7 @@ class SlowEchoServiceHandler(ServiceMessageHandler):
 ## runtime configuration
 ##
 config = {
-    'msg_conn': ServiceConnection('ipc://run/slow', 'my_shared_secret'),
+    'msg_conn': ServiceCoConnection('ipc://run/slow', 'my_shared_secret'),
     'handler_tuples': [ ## Set up our routes
         # Handle our service responses
         (r'^/service/slow', SlowEchoServiceHandler),

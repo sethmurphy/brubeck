@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import logging
 import time
-from brubeck.connections import Mongrel2CoConnection
+from brubeck.connections import Mongrel2Connection, Mongrel2CoConnection
 from brubeck.request_handling import (
     JSONMessageHandler,
     WebMessageHandler, 

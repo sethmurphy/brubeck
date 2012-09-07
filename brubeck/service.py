@@ -7,7 +7,6 @@ import ujson as json
 from connections import (
     load_zmq,
     load_zmq_ctx,
-    Mongrel2Connection,
     ZMQConnection,
 )
 from request import Request, to_bytes, to_unicode
@@ -15,7 +14,9 @@ from request_handling import (
     MessageHandler,
     http_response,
     MESSAGE_TYPES,
-    coro_spawn
+    coro_spawn,
+    coro_get_event,
+    coro_send_event,
 )
 from dictshield.document import Document
 from dictshield.fields import (StringField,
@@ -31,7 +32,6 @@ from brubeck.request_handling import parse_msgstring
 
 _DEFAULT_SERVICE_REQUEST_METHOD = 'request'
 _DEFAULT_SERVICE_RESPONSE_METHOD = 'response'
-
 
 #################################
 ## Request and Response stuff 
@@ -208,6 +208,26 @@ class ServiceResponse(ServiceRequest):
 ######################################################################################
 
 # this is outside the class in case we want to run with coro_spawn
+def service_connection_process_message(application, message):
+    """This coroutine looks at the message, determines which handler will
+    be used to process it, and then begins processing.
+    
+    The application is responsible for handling misconfigured routes.
+    """
+
+    service_request = parse_service_request(message, application.msg_conn.passphrase)
+    service_request.message_type = MESSAGE_TYPES[application.msg_conn._BRUBECK_MESSAGE_TYPE]
+
+    handler = application.route_message(service_request)
+    result = handler()
+
+    msg = {}
+
+    if result is not None and result is not "":
+        msg = json.dumps(result)
+    service_response = create_service_response(service_request, handler, method='response', arguments={}, msg=msg, headers={})
+        
+    application.msg_conn.send(service_response)
 
 class ServiceConnection(ZMQConnection):
     """This class is specific to handling communication with a ServiceClientConnection.
@@ -245,25 +265,8 @@ class ServiceConnection(ZMQConnection):
         #in_sock.connect(pull_addr)
 
     def process_message(self, application, message):
-        """This coroutine looks at the message, determines which handler will
-        be used to process it, and then begins processing.
-        
-        The application is responsible for handling misconfigured routes.
-        """
-    
-        service_request = parse_service_request(message, application.msg_conn.passphrase)
-        service_request.message_type = MESSAGE_TYPES[application.msg_conn._BRUBECK_MESSAGE_TYPE]
-    
-        handler = application.route_message(service_request)
-        result = handler()
-    
-        msg = {}
-    
-        if result is not None and result is not "":
-            msg = json.dumps(result)
-        service_response = create_service_response(service_request, handler, method='response', arguments={}, msg=msg, headers={})
-            
-        application.msg_conn.send(service_response)
+        """Don't use a coroutine"""
+        service_connection_process_message(application, message)
 
     def send(self, service_response):
         """uuid = unique ID that both the client and server need to match
@@ -321,6 +324,10 @@ class ServiceConnection(ZMQConnection):
         
         return zmq_msg
 
+class ServiceCoConnection(ServiceConnection):
+    def process_message(self, application, message):
+        """Use a coroutine"""
+        coro_spawn(service_connection_process_message, application, message)
 
 # this is outside the class in case we want to run with coro_spawn
 class ServiceClientConnection(ServiceConnection):
@@ -461,32 +468,21 @@ class ServiceClientMixin(object):
         return self._zmq_ctx
 
     def _wait(self, service_addr, conn_id):
-        # use an inproc socket, naturally non-blocking blocking
-        # in memory sending, cheap
-        zmq = self.zmq
-        ctx = self.zmq_ctx
+        """wait fro the application to create an event from the service listener"""
         raw_response = None
         conn_id = str(conn_id)
 
-        logging.debug("starting internal reply socket %s" % conn_id)
-        req_sock = ctx.socket(zmq.PAIR)
-        rep_sock = ctx.socket(zmq.PAIR)
 
-        req_sock.bind('inproc://%s' % conn_id)
-        rep_sock.connect('inproc://%s' % conn_id)
+        logging.debug("creating event for %s" % conn_id)
 
-        waiting_sockets = self.application.get_waiting_sockets(service_addr)
-        waiting_sockets[conn_id] = (int(time.time()), req_sock)
+        e = coro_get_event()
+        waiting_events = self.application.get_waiting_clients(service_addr)
+        waiting_events[conn_id] = (int(time.time()), e)
 
-        try:
-            logging.debug("internal socket %s waiting" % conn_id)
-            raw_response = rep_sock.recv()
-            logging.debug("internal socket %s receiving" % conn_id)
-        finally:
-            rep_sock.close()
-            logging.debug("closed internal reply socket %s" % conn_id)
-            req_sock.close()
-            logging.debug("closed internal request socket %s" % conn_id)
+        logging.debug("event for %s waiting" % conn_id)
+        raw_response = e.wait()
+        logging.debug("event for %s raised" % conn_id)
+
 
         if raw_response is not None:
             service_conn = self.application.get_service_conn(service_addr)
