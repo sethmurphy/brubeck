@@ -197,7 +197,7 @@ class ZMQConnection(Connection):
 ###
 ### Mongrel2
 ###
-# this is just for testing, should be in class
+
 def mongrel2_process_message(application, message):
     """This coroutine looks at the message, determines which handler will
     be used to process it, and then begins processing.
@@ -220,7 +220,8 @@ class Mongrel2Connection(ZMQConnection):
     """
 
     def process_message(self, application, message):
-        mongrel2_process_message(application, message)
+        """Use a coroutine to process the message."""
+        coro_spawn(mongrel2_process_message, application, message)
 
     def send(self, uuid, conn_id, msg):
         """Raw send to the given connection ID at the given uuid, mostly used
@@ -249,12 +250,6 @@ class Mongrel2Connection(ZMQConnection):
         """Same as close but does it to a whole bunch of idents at a time.
         """
         self.reply_bulk(uuid, idents, "")
-
-class Mongrel2CoConnection(Mongrel2Connection):
-    """This class is specific to handling messages from Mongrel2.
-    """
-    def process_message(self, application, message):
-        coro_spawn(mongrel2_process_message, application, message)
 
 ###
 ### WSGI 

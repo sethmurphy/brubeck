@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import logging
 import time
-from brubeck.connections import Mongrel2Connection, Mongrel2CoConnection
+from brubeck.connections import Mongrel2Connection
 from brubeck.request_handling import (
     JSONMessageHandler,
     WebMessageHandler, 
@@ -15,7 +15,6 @@ from brubeck.templating import (
     Jinja2Rendering,
     load_jinja2_env,
 )
-
 # some static data for testing
 service_addr = "ipc://run/slow"
 service_passphrase = "my_shared_secret"
@@ -45,7 +44,7 @@ class CallServiceAsyncHandler(
     ):
 
     def get(self):
-        # register our service, if exist nothing happens
+        # register our resource
         self.register_service(service_addr, service_passphrase)
         # create a servicerequest
         service_request = self.create_service_request(
@@ -94,7 +93,7 @@ class CallServiceSyncHandler(
         context = {
             'name': response.body["RETURN_DATA"],
         }
-        logging.debug("service_infos: %s" % self.application._services)
+        logging.debug("service_infos: %s" % self.application._resources)
         return self.render_template('success.html', **context)
 
 class ServiceResponseHandler(ServiceMessageHandler):
@@ -115,8 +114,7 @@ class ServiceResponseHandler(ServiceMessageHandler):
 ## runtime configuration
 ##
 config = {
-    # we need a Mongrel2CoConnection to run each requests handling  in a greenlet
-    'msg_conn': Mongrel2CoConnection('tcp://127.0.0.1:9999', 
+    'msg_conn': Mongrel2Connection('tcp://127.0.0.1:9999', 
                                      'tcp://127.0.0.1:9998'),
     'handler_tuples': [ ## Set up our routes
         # Handle our service responses

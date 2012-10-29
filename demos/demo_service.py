@@ -7,7 +7,6 @@ from brubeck.request_handling import (
 )
 from brubeck.service import (
     ServiceConnection,
-    ServiceCoConnection,
     ServiceMessageHandler,
 )
 from brubeck.templating import (
@@ -32,7 +31,7 @@ class SlowEchoServiceHandler(ServiceMessageHandler):
 ## runtime configuration
 ##
 config = {
-    'msg_conn': ServiceCoConnection('ipc://run/slow', 'my_shared_secret'),
+    'msg_conn': ServiceConnection('ipc://run/slow', 'my_shared_secret'),
     'handler_tuples': [ ## Set up our routes
         # Handle our service responses
         (r'^/service/slow', SlowEchoServiceHandler),

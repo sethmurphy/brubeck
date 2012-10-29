@@ -161,19 +161,6 @@ def cookie_is_encoded(data):
     ''' Return True if the argument looks like a encoded cookie.'''
     return bool(data.startswith(to_bytes('!')) and to_bytes('?') in data)
 
-def parse_msgstring(field_text):
-    """ field_value - a value in n:data format where n is the data length
-            and data is the text to get the first n chars from
-        returns the a tuple containing the value and whatever remains
-    """
-    field_data = field_text.split(':', 1)
-    expected_len = int(field_data[0])
-    field_value = field_data[1]
-    value = field_value[0:expected_len]
-    rest = field_value[expected_len:] if len(field_value) > expected_len else ''
-    return (value, rest)
-
-
 ###
 ### Message handling
 ###
@@ -641,28 +628,6 @@ class JsonSchemaMessageHandler(WebMessageHandler):
 
         return response
 
-###
-### Application logic
-###
-
-def service_response_listener(application, service_addr, service_conn):
-    """runs in a coroutine, one listener for each server per handler.
-    Onc running, it stays running until the brubeck instance is killed."""
-    ##try:
-    while True:
-        logging.debug("service_response_listener waiting");
-        raw_response = service_conn.recv()
-        logging.debug("service_response_listener recv(): %s" % raw_response);
-        # just send raw message to connection client
-        sender, conn_id = raw_response.split(' ', 1)
-        
-        conn_id = parse_msgstring(conn_id)[0]
-        application.notify_service_client(service_addr, conn_id, raw_response)
-    ##except:
-    ##    raise
-    ##finally:
-    ##    # once a listener dies, de-register the service, it's useless
-    ##    application.unregister_service(service_addr)
 
 class Brubeck(object):
 
@@ -750,7 +715,7 @@ class Brubeck(object):
         self.cookie_secret = cookie_secret
 
         # holds our registered service connections and corresponding listeners
-        self._services = {}  
+        self._resources = {}  
 
         # Any template engine can be used. Brubeck just needs a function that
         # loads the environment without arguments.
@@ -895,100 +860,59 @@ class Brubeck(object):
         JsonSchemaMessageHandler.add_model(model)
 
     ##########################################################################
-    ## Deal with registering/deregistering services at the application level
-    ## used by ServiceClientMixin handler
+    ## Deal with registering/deregistering resources at the application level
+    ## An example of a resource would be a service (see service.py)
     ##########################################################################
 
+    def registered_resources(self):
+        """Access to our registered resources.""" 
+        return self._resources
 
-    def registered_services(self):
-        """Access to our registered services""" 
-        return self._services
-        
-    def service_is_registered(self, service_addr):
-        """ Check if a service is registered""" 
-        if service_addr in self._services:
+    def is_resource_registered(self, key):
+        """ Check if a resource is registered.""" 
+        if key in self._resources:
             return True
         else:
             return False
 
-    def register_service(self, service_addr, service_conn):
-        """ Create and store a connection and it's listener and waiting_clients queue.
-        """ 
-        if service_addr not in self._services:
-            # create our service connection
-            logging.debug("register_service creating service_conn: %s" % service_addr)
-
-            # create and start our listener
-            logging.debug("register_service starting listener: %s" % service_addr)
-            coro_spawn(service_response_listener, self, service_addr, service_conn)
-            # give above process a chance to start
-            coro_sleep(0)
-
+    def register_resource(self, resource):
+        """ Store (register) a resource and call our on_register hook.
+        """
+        key = resource.key()
+        if key not in self._resources:
             # add us to the list
-            self._services[service_addr] = {
-                'service_conn': service_conn,
-                'waiting_clients': {},
-            }
-            logging.debug("register_service success: %s" % service_addr)
+            self._resources[key] = resource
+            resource._on_register()
+            logging.debug("register_resource success: %s" % resource.name)
         else:
-            logging.debug("register_service ignored: %s already registered" % service_addr)
+            logging.debug("register_resource ignored: %s already registered" % 
+                resource.name)
         return True
 
-    def unregister_service(self, service_addr):
-        """ Create and store a connection and it's listener and waiting_clients queue.
-        To be safe, for now there is no unregister.
+    def unregister_resource(self, key):
+        """ Call our on_unregister hook and delete from list.
         """ 
-        if service_addr not in self._services:
-            logging.debug("unregister_service ignored: %s not registered" % service_addr)
+        if key not in self._resources:
+            logging.debug("unregister_resource ignored: %s not registered" % key)
             return False
         else:
-            service_info = self._services[service_addr]
-            # make sure we don't get new requests
-            service_conn = service_info['service_conn']
-            waiting_clients = service_info['waiting_clients']
+            resource = self._resources[key]
+            resource._on_unregistered()
+            logging.debug("unregister_resource success: %s" % service_addr)
 
-
-            service_conn.close()
-            for sock in waiting_clients:
-                logging.debug("killing internal reply socket %s" % sock)
-                sock.close()
-
-            logging.debug("unregister_service success: %s" % service_addr)
-
-            del self._services[service_addr]
+            resource._on_unregister()
+            del self._resources[key]
 
             return True
 
-    def get_service_info(self, service_addr):
-        if service_addr in self._services:
-            return self._services[service_addr]
+    def get_resource(self, key):
+        """ Check if key is a resource that is registered
+        and return resource if found, None if not found.
+        """ 
+        if key in self._resources:
+            return self._resources[key]
         else:
-            raise Exception("%s service not registered" % service_addr)
-
-    def get_service_conn(self, service_addr):
-        return self.get_service_info(service_addr)['service_conn']
-
-    def send_service_request(self, service_addr, service_req):
-        """send our message, used internally only"""
-        logging.debug("sending service request")
-        service_conn = self.get_service_conn(service_addr)
-        return service_conn.send(service_req)
-    
-    def get_waiting_clients(self, service_addr):
-        return self.get_service_info(service_addr)['waiting_clients']
-
-    def notify_service_client(self, service_addr, conn_id, raw_results):
-        logging.debug("NOTIFY: %s: %s (%s)" % (service_addr, conn_id, raw_results))
-        waiting_clients = self.get_waiting_clients(service_addr)
-        logging.debug("waiting_clients: %s" % (waiting_clients))
-        conn_id = str(conn_id)
-        if conn_id in waiting_clients:
-            logging.debug("conn_id %s found to notify(%s)" % (conn_id,waiting_clients[conn_id]))
-            coro_send_event(waiting_clients[conn_id][1], raw_results)
-            logging.debug("conn_id %s sent to: %s" % (conn_id, raw_results))
-            coro_sleep(0)
-        else:
-            logging.debug("conn_id %s not found to notify." % conn_id)
+            return None
 
 
     ###

@@ -9,6 +9,7 @@ brubeck/models.py
 brubeck/queryset.py
 brubeck/request.py
 brubeck/request_handling.py
+brubeck/resource.py
 brubeck/service.py
 brubeck/templating.py
 brubeck/timekeeping.py
