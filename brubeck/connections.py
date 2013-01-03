@@ -124,6 +124,23 @@ def load_zmq_ctx():
 ### Mongrel2
 ###
 
+def mongrel2_connection_process_message(application, message):
+    """This coroutine looks at the message, determines which handler will
+        be used to process it, and then begins processing.
+        
+        The application is responsible for handling misconfigured routes.
+        """
+    request = Request.parse_msg(message)
+    if request.is_disconnect():
+        return  # Ignore disconnect msgs. Dont have areason to do otherwise
+    handler = application.route_message(request)
+    result = handler()
+    
+    http_content = http_response(result['body'], result['status_code'],
+                                 result['status_msg'], result['headers'])
+    
+    application.msg_conn.reply(request, http_content)
+
 class Mongrel2Connection(Connection):
     """This class is an abstraction for how Brubeck sends and receives
     messages. This abstraction makes it possible for something other than
@@ -154,21 +171,8 @@ class Mongrel2Connection(Connection):
         out_sock.connect(pub_addr)
 
     def process_message(self, application, message):
-        """This coroutine looks at the message, determines which handler will
-        be used to process it, and then begins processing.
-        
-        The application is responsible for handling misconfigured routes.
-        """
-        request = Request.parse_msg(message)
-        if request.is_disconnect():
-            return  # Ignore disconnect msgs. Dont have areason to do otherwise
-        handler = application.route_message(request)
-        result = handler()
-
-        http_content = http_response(result['body'], result['status_code'],
-                                     result['status_msg'], result['headers'])
-
-        application.msg_conn.reply(request, http_content)
+        """Use a coroutine to process the message."""
+        coro_spawn(mongrel2_connection_process_message, application, message)
 
     def recv(self):
         """Receives a raw mongrel2.handler.Request object that you from the
