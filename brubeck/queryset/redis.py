@@ -1,5 +1,6 @@
 from brubeck.queryset.base import AbstractQueryset
 from itertools import imap
+import logging
 import ujson as json
 import zlib
 try:
@@ -29,8 +30,8 @@ class RedisQueryset(AbstractQueryset):
         
     def _setvalue(self, shield):
         if self.compress:
-            return zlib.compress(shield.to_json(), self.compress_level)
-        return shield.to_json()
+            return zlib.compress(json.dumps(shield), self.compress_level)
+        return json.dumps(shield)
 
     def _readvalue(self, value):
         if self.compress:
@@ -53,9 +54,16 @@ class RedisQueryset(AbstractQueryset):
     ### Create Functions
 
     def create_one(self, shield):
-        shield_value = self._setvalue(shield)
+        #logging.debug("shield in: %s" % shield)
+        #logging.debug("shield in json.dumps(): %s" % json.dumps(shield))
+        shield_value = json.dumps(shield) # self._setvalue(shield)
         shield_key = str(getattr(shield, self.api_id))        
         result = self.db_conn.hset(self.api_id, shield_key, shield_value)
+
+        logging.debug("shield_value: %s" % shield_value)
+        logging.debug("shield_key: %s" % shield_key)
+        logging.debug("result: %s" % result)
+
         if result:
             return (self.MSG_CREATED, shield)
         return (self.MSG_UPDATED, shield)
