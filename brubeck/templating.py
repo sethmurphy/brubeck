@@ -66,12 +66,13 @@ class Jinja2Rendering(WebMessageHandler):
         self.set_body(body, status_code=_status_code)
         return self.render()
 
-    def render_error(self, error_code):
+    def render_error(self, error_code, error_msg = None):
         """Receives error calls and sends them through a templated renderer
         call.
         """
         return self.render_template('errors.html', _status_code=error_code,
-                                    **{'error_code': error_code})
+                                    **{'error_code': error_code,
+                                       'error_msg': error_code})
 
 
 ###
