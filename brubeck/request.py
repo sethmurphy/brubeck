@@ -20,10 +20,6 @@ def to_bytes(data, enc='utf8'):
 def to_unicode(s, enc='utf8'):
     """Convert anything to unicode
     """
-    logging.debug("to_unicode")
-    logging.debug(s)
-    logging.debug(str(s))
-    logging.debug("to_unicode")
     try:
         return s if isinstance(s, unicode) else unicode(str(s), encoding=enc)
     except Exception as e:

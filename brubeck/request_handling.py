@@ -209,6 +209,7 @@ class MessageHandler(object):
     def on_finish(self):
         """Called after the message handling method. Counterpart to prepare
         """
+        logging.debug('on_finish not implemeted in: %s' % self)
         pass
 
     @property
