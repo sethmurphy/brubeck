@@ -422,14 +422,15 @@ class WebMessageHandler(MessageHandler):
     def error(self, err):
         self.render_error(self._SERVER_ERROR)
 
-    def redirect(self, url):
+    def redirect(self, url, status_code=302, msg=None):
         """Clears the payload before rendering the error status
         """
         logging.debug('Redirecting to url: %s' % url)
         self.clear_payload()
         self._finished = True
-        msg = 'Page has moved to %s' % url
-        self.set_status(302, status_msg=msg)
+        if msg is None:
+            msg = 'Page has moved to %s' % url
+        self.set_status(status_code, status_msg=msg)
         self.headers['Location'] = '%s' % url
         return self.render()
 
