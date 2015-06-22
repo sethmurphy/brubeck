@@ -45,6 +45,7 @@ from . import version
 
 import re
 import time
+import datetime
 import logging
 import inspect
 import Cookie
@@ -422,15 +423,17 @@ class WebMessageHandler(MessageHandler):
     def error(self, err):
         self.render_error(self._SERVER_ERROR)
 
-    def redirect(self, url, status_code=302, msg=None):
+    def redirect(self, url, status_code=None, status_msg=None):
         """Clears the payload before rendering the error status
         """
         logging.debug('Redirecting to url: %s' % url)
         self.clear_payload()
         self._finished = True
-        if msg is None:
-            msg = 'Page has moved to %s' % url
-        self.set_status(status_code, status_msg=msg)
+        if status_code is None:
+            status_code = 302
+        if status_msg is None:
+            status_msg = 'Page has moved to %s' % url
+        self.set_status(status_code, status_msg=status_msg)
         self.headers['Location'] = '%s' % url
         return self.render()
 
@@ -495,6 +498,16 @@ class WebMessageHandler(MessageHandler):
         If neither `expires` nor `max_age` are set (default), the cookie
         lasts only as long as the browser is not closed.
         """
+        if not kwargs is None and 'expires' in kwargs:
+            expires_seconds = 0.0
+            if isinstance(kwargs['expires'], datetime.datetime):
+                expires_datetime = kwargs['expires']
+                expires_ts = (expires_datetime - datetime.datetime(1970, 1, 1)).total_seconds()
+                kwargs['expires'] = time.strftime("%a, %d-%b-%Y %T GMT", time.gmtime(expires_ts))
+            elif isinstance(kwargs['expires'], float):
+                expires_ts = kwargs['expires']
+                kwargs['expires'] = time.strftime("%a, %d-%b-%Y %T GMT", time.gmtime(expires_ts))
+
         if secret:
             value = cookie_encode((key, value), secret)
         elif not isinstance(value, basestring):
